@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: vantorium-bot
+    name: Purna-2
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
