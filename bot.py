@@ -296,7 +296,6 @@ def geri_menu():
 def kisi_listesi_ekrani(sayfa=0):
     """Kişi listesini sayfalı olarak hazırla."""
     kullanicilar = list(data["kullanicilar"].items())
-    # Puanı yüksekten düşüğe sırala
     kullanicilar.sort(key=lambda x: x[1].get("puan", 0), reverse=True)
 
     toplam = len(kullanicilar)
@@ -339,7 +338,6 @@ def kisi_listesi_ekrani(sayfa=0):
                 f"    💰 {u.get('puan', 0)} | 🎁 {u.get('referans', 0)}\n"
             )
 
-    # Sayfalama butonları
     keyboard = []
     nav_row = []
     if sayfa > 0:
@@ -684,7 +682,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     cdata = query.data
 
-    # Kişi listesi callback'i kanal kontrolünden muaf değil ama admin kontrolü var
     if not cdata.startswith("iade"):
         if not await kanal_kontrol(context, user_id):
             await query.answer()
@@ -960,7 +957,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=geri_menu(), parse_mode="Markdown"
         )
 
-    # ═══════════ ADMIN PANEL ═══════════
     elif cdata == "admin_panel":
         await query.answer()
         if not admin_mi(user_id):
@@ -991,7 +987,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=keyboard, parse_mode="Markdown"
         )
 
-    # ═══════════ KİŞİ LİSTESİ ═══════════
     elif cdata == "kisi_listesi":
         await query.answer()
         if not admin_mi(user_id):
@@ -1111,7 +1106,6 @@ async def duyuru_yap(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📢 **Yeni:** {data['duyuru'][:200]}", ikon="📢")
 
 async def kisiler_komutu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Kullanıcı listesini komutla göster."""
     if not admin_mi(update.effective_user.id): return
     text, keyboard = kisi_listesi_ekrani(sayfa=0)
     await update.message.reply_text(text, reply_markup=keyboard, parse_mode="Markdown")
