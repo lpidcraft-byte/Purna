@@ -86,6 +86,7 @@ ULKE_KODLARI = {
     "373": "🇲🇩 Moldova", "380": "🇺🇦 Ukrayna", "381": "🇷🇸 Sırbistan",
     "385": "🇭🇷 Hırvatistan", "386": "🇸🇮 Slovenya", "387": "🇧🇦 Bosna",
     "389": "🇲🇰 Makedonya", "420": "🇨🇿 Çekya", "421": "🇸🇰 Slovakya",
+    "509": "🇭🇹 Haiti",
     "880": "🇧🇩 Bangladeş", "961": "🇱🇧 Lübnan", "962": "🇯🇴 Ürdün",
     "963": "🇸🇾 Suriye", "964": "🇮🇶 Irak", "965": "🇰🇼 Kuveyt",
     "966": "🇸🇦 S.Arabistan", "967": "🇾🇪 Yemen", "968": "🇴🇲 Umman",
@@ -453,7 +454,6 @@ def coklu_numara_getir(user_id, sunucu=1, adet=NUMARA_SAYISI):
     if not sunucu_listesi:
         return []
 
-    # Farklı numaraları al (aynı numara birden fazla gelmesin)
     secilmis_numaralar = set()
     yeni_liste = []
     for item in sunucu_listesi:
@@ -467,7 +467,6 @@ def coklu_numara_getir(user_id, sunucu=1, adet=NUMARA_SAYISI):
         if len(yeni_liste) >= adet:
             break
 
-    # Yeterli yeni numara yoksa görülenleri sıfırla
     if len(yeni_liste) < adet:
         kullanici["gorulen_numaralar"] = []
         data["kullanicilar"][str(user_id)] = kullanici
@@ -484,7 +483,6 @@ def coklu_numara_getir(user_id, sunucu=1, adet=NUMARA_SAYISI):
     if not yeni_liste:
         return []
 
-    # Kullanıcının görülen numaralarına ekle
     yeni_gorulen = kullanici.get("gorulen_numaralar", [])
     for item in yeni_liste:
         yeni_gorulen.append(str(item[1]))
@@ -823,7 +821,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-            # 3 numarayı veri'ye kaydet
             data["gecici_numaralar"][str(user_id)] = numaralar
             veri_kaydet(data)
 
