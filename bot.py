@@ -6,6 +6,7 @@ import random
 import re
 import hashlib
 import threading
+import asyncio
 from datetime import datetime
 from flask import Flask, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -47,7 +48,6 @@ FIYAT_HAVUZU = [1, 2, 3, 5, 8, 10]
 SUNUCU1_ULKELER = ["90", "1", "44", "49", "33", "7", "971", "966", "20", "62", "92", "880", "994", "995", "998"]
 SUNUCU1_SERVISLER = WHATSAPP_KEYWORDS + TELEGRAM_KEYWORDS + ["instagram", "facebook", "tiktok", "google", "twitter", "discord"]
 
-# Logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
@@ -294,7 +294,6 @@ def geri_menu():
 #           👥 KİŞİ LİSTESİ GÖRÜNÜMÜ
 # ═══════════════════════════════════════════
 def kisi_listesi_ekrani(sayfa=0):
-    """Kişi listesini sayfalı olarak hazırla."""
     kullanicilar = list(data["kullanicilar"].items())
     kullanicilar.sort(key=lambda x: x[1].get("puan", 0), reverse=True)
 
@@ -1132,16 +1131,27 @@ def health():
 
 def run_flask():
     logger.info(f"Flask başlatılıyor: port {PORT}")
-    flask_app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
+    flask_app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False, threaded=True)
 
 # ═══════════════════════════════════════════
 #              🚀 BAŞLAT
 # ═══════════════════════════════════════════
 def main():
+    # ⚠️ Python 3.14+ için event loop oluştur (yoksa run_polling patlar)
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            raise RuntimeError("closed")
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    # Flask'ı arka planda başlat
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     logger.info("Flask thread başlatıldı")
 
+    # Telegram bot
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -1159,7 +1169,8 @@ def main():
     logger.info("╔══════════════════════════╗")
     logger.info("   🤖  BOT ÇALIŞIYOR...")
     logger.info("╚══════════════════════════╝")
-    app.run_polling(drop_pending_updates=True)
+
+    app.run_polling(drop_pending_updates=True, close_loop=False)
 
 if __name__ == "__main__":
     main()
