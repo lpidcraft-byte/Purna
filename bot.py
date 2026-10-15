@@ -244,8 +244,8 @@ async def referans_bildirim_gonder(context, davet_eden_id, yeni_kullanici):
             f"💰 Puan: **{toplam_puan}**"
         )
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔗 Referans Linkim", callback_data="referans", style="primary")],
-            [InlineKeyboardButton("🏠 Ana Menü", callback_data="geri_menu", style="success")]
+            [InlineKeyboardButton("🔗 Referans Linkim", callback_data="referans")],
+            [InlineKeyboardButton("🏠 Ana Menü", callback_data="geri_menu")]
         ])
         await context.bot.send_message(
             chat_id=davet_eden_id, text=text,
@@ -270,27 +270,27 @@ async def referans_bildirim_gonder(context, davet_eden_id, yeni_kullanici):
 # ═══════════════════════════════════════════
 def ana_menu():
     keyboard = [
-        [InlineKeyboardButton("🚀 Sunucu 1 (Önerilen)", callback_data="sunucu_1", style="success"),
-         InlineKeyboardButton("📡 Sunucu 2", callback_data="sunucu_2", style="primary")],
-        [InlineKeyboardButton("👤 Profilim", callback_data="profil", style="primary"),
-         InlineKeyboardButton("🔗 Referans", callback_data="referans", style="primary")],
-        [InlineKeyboardButton("📢 Duyuru", callback_data="duyuru", style="primary")],
-        [InlineKeyboardButton("👑 Admin Paneli", callback_data="admin_panel", style="danger")]
+        [InlineKeyboardButton("🚀 Sunucu 1 (Önerilen)", callback_data="sunucu_1"),
+         InlineKeyboardButton("📡 Sunucu 2", callback_data="sunucu_2")],
+        [InlineKeyboardButton("👤 Profilim", callback_data="profil"),
+         InlineKeyboardButton("🔗 Referans", callback_data="referans")],
+        [InlineKeyboardButton("📢 Duyuru", callback_data="duyuru")],
+        [InlineKeyboardButton("👑 Admin Paneli", callback_data="admin_panel")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
 def kanal_menu():
     keyboard = [
-        [InlineKeyboardButton("📢 VANTORİUM BANNED", url=KANALLAR[0], style="primary")],
-        [InlineKeyboardButton("📢 Zyrven İlk Yazan", url=KANALLAR[1], style="primary")],
-        [InlineKeyboardButton("📢 OTP BOT LOGS", url=KANALLAR[2], style="primary")],
-        [InlineKeyboardButton("✅ Katıldım", callback_data="katildim", style="success")]
+        [InlineKeyboardButton("📢 VANTORİUM BANNED", url=KANALLAR[0])],
+        [InlineKeyboardButton("📢 Zyrven İlk Yazan", url=KANALLAR[1])],
+        [InlineKeyboardButton("📢 OTP BOT LOGS", url=KANALLAR[2])],
+        [InlineKeyboardButton("✅ Katıldım", callback_data="katildim")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
 def geri_menu():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 Ana Menü", callback_data="geri_menu", style="success")]
+        [InlineKeyboardButton("🔙 Ana Menü", callback_data="geri_menu")]
     ])
 
 # ═══════════════════════════════════════════
@@ -343,14 +343,14 @@ def kisi_listesi_ekrani(sayfa=0):
     keyboard = []
     nav_row = []
     if sayfa > 0:
-        nav_row.append(InlineKeyboardButton("⬅️ Önceki", callback_data=f"kisi_sayfa_{sayfa - 1}", style="primary"))
+        nav_row.append(InlineKeyboardButton("⬅️ Önceki", callback_data=f"kisi_sayfa_{sayfa - 1}"))
     if sayfa < toplam_sayfa - 1:
-        nav_row.append(InlineKeyboardButton("Sonraki ➡️", callback_data=f"kisi_sayfa_{sayfa + 1}", style="primary"))
+        nav_row.append(InlineKeyboardButton("Sonraki ➡️", callback_data=f"kisi_sayfa_{sayfa + 1}"))
     if nav_row:
         keyboard.append(nav_row)
 
-    keyboard.append([InlineKeyboardButton("🔄 Yenile", callback_data=f"kisi_sayfa_{sayfa}", style="success")])
-    keyboard.append([InlineKeyboardButton("🔙 Admin Paneli", callback_data="admin_panel", style="danger")])
+    keyboard.append([InlineKeyboardButton("🔄 Yenile", callback_data=f"kisi_sayfa_{sayfa}")])
+    keyboard.append([InlineKeyboardButton("🔙 Admin Paneli", callback_data="admin_panel")])
 
     return text, InlineKeyboardMarkup(keyboard)
 
@@ -480,7 +480,7 @@ async def iade_aktif_et(context: ContextTypes.DEFAULT_TYPE):
     order = data["siparisler"][order_id]
     if order["durum"] != "aktif":
         return
-    keyboard = [[InlineKeyboardButton("💰 İade Et", callback_data=f"iade_et_{order_id}", style="success")]]
+    keyboard = [[InlineKeyboardButton("💰 İade Et", callback_data=f"iade_et_{order_id}")]]
     try:
         await context.bot.edit_message_reply_markup(
             chat_id=order["chat_id"], message_id=order["message_id"],
@@ -591,8 +591,8 @@ async def sms_bekle(context: ContextTypes.DEFAULT_TYPE):
             )
 
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 Yeni Numara Al", callback_data="numara_al", style="primary")],
-            [InlineKeyboardButton("🔙 Ana Menü", callback_data="geri_menu", style="success")]
+            [InlineKeyboardButton("🔄 Yeni Numara Al", callback_data="numara_al")],
+            [InlineKeyboardButton("🔙 Ana Menü", callback_data="geri_menu")]
         ])
 
         await context.bot.send_message(
@@ -655,7 +655,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # Kanal kontrolü
         kanal_ok = await kanal_kontrol(context, user.id)
         logger.info(f"[START] kanal_ok={kanal_ok}")
         if not kanal_ok:
@@ -747,9 +746,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             numara = tek_numara_getir(user_id, sunucu=sunucu)
             if not numara:
                 keyboard = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🚀 Sunucu 1", callback_data="sunucu_1", style="success"),
-                     InlineKeyboardButton("📡 Sunucu 2", callback_data="sunucu_2", style="primary")],
-                    [InlineKeyboardButton("🔙 Ana Menü", callback_data="geri_menu", style="danger")]
+                    [InlineKeyboardButton("🚀 Sunucu 1", callback_data="sunucu_1"),
+                     InlineKeyboardButton("📡 Sunucu 2", callback_data="sunucu_2")],
+                    [InlineKeyboardButton("🔙 Ana Menü", callback_data="geri_menu")]
                 ])
                 await query.edit_message_text(
                     f"❌ **{sunucu_adi}**'da uygun numara bulunamadı.\nDiğer sunucuyu dene 👇",
@@ -779,15 +778,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if yeterli:
                 keyboard = InlineKeyboardMarkup([
-                    [InlineKeyboardButton(f"✅ Satın Al ({numara['fiyat']} 💎)", callback_data="satin_al_0", style="success")],
-                    [InlineKeyboardButton("🔄 Başka Numara", callback_data=f"sunucu_{sunucu}", style="primary")],
-                    [InlineKeyboardButton("🔙 Geri", callback_data="geri_menu", style="danger")]
+                    [InlineKeyboardButton(f"✅ Satın Al ({numara['fiyat']} 💎)", callback_data="satin_al_0")],
+                    [InlineKeyboardButton("🔄 Başka Numara", callback_data=f"sunucu_{sunucu}")],
+                    [InlineKeyboardButton("🔙 Geri", callback_data="geri_menu")]
                 ])
             else:
                 text += f"\n\n❌ **Yetersiz puan!** En az {numara['fiyat']} puan gerekli."
                 keyboard = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔄 Başka Numara", callback_data=f"sunucu_{sunucu}", style="primary")],
-                    [InlineKeyboardButton("🔙 Geri", callback_data="geri_menu", style="danger")]
+                    [InlineKeyboardButton("🔄 Başka Numara", callback_data=f"sunucu_{sunucu}")],
+                    [InlineKeyboardButton("🔙 Geri", callback_data="geri_menu")]
                 ])
 
             await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
@@ -850,7 +849,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("⏳ İade (1 dk bekleyin)", callback_data=f"iade_bekle_{order_id}", style="danger")]
+                [InlineKeyboardButton("⏳ İade (1 dk bekleyin)", callback_data=f"iade_bekle_{order_id}")]
             ])
 
             await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
@@ -980,15 +979,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text("❌ Yetkin yok!")
                 return
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📢 Duyuru Yap", callback_data="admin_duyuru", style="primary")],
-                [InlineKeyboardButton("➕ Puan Ekle", callback_data="admin_puan_ekle", style="success"),
-                 InlineKeyboardButton("➖ Puan Eksilt", callback_data="admin_puan_eksilt", style="danger")],
-                [InlineKeyboardButton("🚫 Banla", callback_data="admin_banla", style="danger"),
-                 InlineKeyboardButton("✅ Ban Aç", callback_data="admin_ban_ac", style="success")],
-                [InlineKeyboardButton("👑 Admin Ekle", callback_data="admin_ekle", style="primary"),
-                 InlineKeyboardButton("🗑️ Admin Çıkar", callback_data="admin_cikar", style="danger")],
-                [InlineKeyboardButton("👥 Kişi Listesi", callback_data="kisi_listesi", style="primary")],
-                [InlineKeyboardButton("🔙 Ana Menü", callback_data="geri_menu", style="success")]
+                [InlineKeyboardButton("📢 Duyuru Yap", callback_data="admin_duyuru")],
+                [InlineKeyboardButton("➕ Puan Ekle", callback_data="admin_puan_ekle"),
+                 InlineKeyboardButton("➖ Puan Eksilt", callback_data="admin_puan_eksilt")],
+                [InlineKeyboardButton("🚫 Banla", callback_data="admin_banla"),
+                 InlineKeyboardButton("✅ Ban Aç", callback_data="admin_ban_ac")],
+                [InlineKeyboardButton("👑 Admin Ekle", callback_data="admin_ekle"),
+                 InlineKeyboardButton("🗑️ Admin Çıkar", callback_data="admin_cikar")],
+                [InlineKeyboardButton("👥 Kişi Listesi", callback_data="kisi_listesi")],
+                [InlineKeyboardButton("🔙 Ana Menü", callback_data="geri_menu")]
             ])
             await query.edit_message_text(
                 "╔══════════════════════════╗\n"
@@ -1162,15 +1161,15 @@ def run_flask_process():
 #              🚀 BAŞLAT
 # ═══════════════════════════════════════════
 def main():
-    # ═══ Flask'ı AYRI PROCESS olarak başlat (event loop'u bozmasın) ═══
+    # Flask'ı AYRI PROCESS olarak başlat
     flask_proc = multiprocessing.Process(target=run_flask_process, daemon=True)
     flask_proc.start()
     logger.info(f"Flask process başlatıldı (PID: {flask_proc.pid})")
 
     import time
-    time.sleep(3)  # Flask ayağa kalksın
+    time.sleep(3)
 
-    # ═══ Telegram bot ANA PROCESS'te (temiz event loop) ═══
+    # Telegram bot ANA PROCESS'te
     logger.info("Telegram bot başlatılıyor...")
     app = Application.builder().token(BOT_TOKEN).build()
 
@@ -1190,7 +1189,6 @@ def main():
     logger.info("   🤖  BOT ÇALIŞIYOR...")
     logger.info("╚══════════════════════════╝")
 
-    # ═══ Ana thread'de polling ═══
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
