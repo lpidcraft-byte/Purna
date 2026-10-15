@@ -1,11 +1,7 @@
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
-.Python
-env/
-venv/
 bot_data.json
 bot.log
 *.pid
 .env
+venv/
