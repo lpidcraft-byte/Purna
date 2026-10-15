@@ -5,7 +5,9 @@ import os
 import random
 import re
 import hashlib
+import threading
 from datetime import datetime
+from flask import Flask, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -19,6 +21,7 @@ BOT_TOKEN = "8361049874:AAEG_-938EZeaf7UaRBFjRuwSuMgHfnbtCM"
 API_URL = "https://numberpanel.tech/api/lifetime"
 ADMIN_IDS = [8967909400, 8913966694]
 LOG_KANAL_ID = -1003812660420
+PORT = int(os.environ.get("PORT", "8080"))
 
 KANALLAR = [
     "https://t.me/vantoriumbanned",
@@ -34,7 +37,7 @@ SMS_BEKLEME_SN = 900
 SMS_POLL_INTERVAL = 3
 REFERANS_PUAN = 1
 GORULEN_LIMIT = 30
-SAYFA_BOYUT = 10   # Kişi listesinde sayfa başına kaç kişi
+SAYFA_BOYUT = 10
 
 WHATSAPP_KEYWORDS = ["whatsapp", "wa", "whats_app"]
 TELEGRAM_KEYWORDS = ["telegram", "tg", "telega"]
@@ -43,6 +46,14 @@ FIYAT_HAVUZU = [1, 2, 3, 5, 8, 10]
 
 SUNUCU1_ULKELER = ["90", "1", "44", "49", "33", "7", "971", "966", "20", "62", "92", "880", "994", "995", "998"]
 SUNUCU1_SERVISLER = WHATSAPP_KEYWORDS + TELEGRAM_KEYWORDS + ["instagram", "facebook", "tiktok", "google", "twitter", "discord"]
+
+# Logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════
 #              🌍 ÜLKE KODLARI
@@ -1110,9 +1121,33 @@ async def log_kaydet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"[{datetime.now()}] {update.effective_user.id}: {update.message.text}")
 
 # ═══════════════════════════════════════════
+#          🌐 FLASK — RENDER HEALTH CHECK
+# ═══════════════════════════════════════════
+flask_app = Flask(__name__)
+
+@flask_app.route("/")
+@flask_app.route("/health")
+def health():
+    return jsonify({
+        "status": "ok",
+        "service": "vantorium-bot",
+        "time": datetime.now().isoformat(),
+        "users": len(data.get("kullanicilar", {})),
+        "orders": len(data.get("siparisler", {}))
+    }), 200
+
+def run_flask():
+    logger.info(f"Flask başlatılıyor: port {PORT}")
+    flask_app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
+
+# ═══════════════════════════════════════════
 #              🚀 BAŞLAT
 # ═══════════════════════════════════════════
 def main():
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    logger.info("Flask thread başlatıldı")
+
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -1127,10 +1162,10 @@ def main():
     app.add_handler(CommandHandler("kisiler", kisiler_komutu))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, log_kaydet))
 
-    print("╔══════════════════════════╗")
-    print("   🤖  BOT ÇALIŞIYOR...")
-    print("╚══════════════════════════╝")
-    app.run_polling()
+    logger.info("╔══════════════════════════╗")
+    logger.info("   🤖  BOT ÇALIŞIYOR...")
+    logger.info("╚══════════════════════════╝")
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
