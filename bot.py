@@ -8,6 +8,7 @@ import hashlib
 import threading
 import asyncio
 import multiprocessing
+import time
 from datetime import datetime
 from flask import Flask, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -40,6 +41,7 @@ SMS_POLL_INTERVAL = 3
 REFERANS_PUAN = 1
 GORULEN_LIMIT = 30
 SAYFA_BOYUT = 10
+NUMARA_SAYISI = 3
 
 WHATSAPP_KEYWORDS = ["whatsapp", "wa", "whats_app"]
 TELEGRAM_KEYWORDS = ["telegram", "tg", "telega"]
@@ -270,14 +272,23 @@ async def referans_bildirim_gonder(context, davet_eden_id, yeni_kullanici):
 # ═══════════════════════════════════════════
 def ana_menu():
     keyboard = [
-        [InlineKeyboardButton("🚀 Sunucu 1 (Önerilen)", callback_data="sunucu_1"),
-         InlineKeyboardButton("📡 Sunucu 2", callback_data="sunucu_2")],
+        [InlineKeyboardButton("📱 Numara Al", callback_data="numara_al_menu")],
         [InlineKeyboardButton("👤 Profilim", callback_data="profil"),
          InlineKeyboardButton("🔗 Referans", callback_data="referans")],
         [InlineKeyboardButton("📢 Duyuru", callback_data="duyuru")],
         [InlineKeyboardButton("👑 Admin Paneli", callback_data="admin_panel")]
     ]
     return InlineKeyboardMarkup(keyboard)
+
+
+def sunucu_menu():
+    keyboard = [
+        [InlineKeyboardButton("🚀 Sunucu 1 (Önerilen)", callback_data="sunucu_1")],
+        [InlineKeyboardButton("📡 Sunucu 2 (Yedek)", callback_data="sunucu_2")],
+        [InlineKeyboardButton("🔙 Geri", callback_data="geri_menu")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
 
 def kanal_menu():
     keyboard = [
@@ -393,10 +404,38 @@ def bu_numaraya_yeni_mesaj_var_mi(numara, eski_imzalar):
             continue
     return None
 
-def tek_numara_getir(user_id, sunucu=1):
+
+def _numara_bilgi_paketle(secilen, sunucu):
+    numara = str(secilen[1])
+    servis_adi = str(secilen[0])
+    servis_l = servis_adi.lower()
+    if any(k in servis_l for k in WHATSAPP_KEYWORDS):
+        servis_tip = "WhatsApp"
+        servis_ikon = "💚"
+    elif any(k in servis_l for k in TELEGRAM_KEYWORDS):
+        servis_tip = "Telegram"
+        servis_ikon = "✈️"
+    else:
+        servis_tip = servis_adi
+        servis_ikon = "💬"
+    return {
+        "servis": servis_adi,
+        "servis_tip": servis_tip,
+        "servis_ikon": servis_ikon,
+        "numara": numara,
+        "mesaj": str(secilen[2]) if len(secilen) > 2 else "",
+        "tarih": str(secilen[3]) if len(secilen) > 3 else "",
+        "ulke": ulke_bul(numara),
+        "fiyat": random.choice(FIYAT_HAVUZU),
+        "sunucu": sunucu
+    }
+
+
+def coklu_numara_getir(user_id, sunucu=1, adet=NUMARA_SAYISI):
+    """Belirtilen sunucudan en fazla `adet` farklı numara döndürür."""
     tum = api_veri_cek()
     if not tum:
-        return None
+        return []
 
     kullanici = data["kullanicilar"].get(str(user_id), {})
     gorulenler = set(kullanici.get("gorulen_numaralar", []))
@@ -412,50 +451,51 @@ def tek_numara_getir(user_id, sunucu=1):
             sunucu_listesi.append(item)
 
     if not sunucu_listesi:
-        return None
+        return []
 
-    yeni_liste = [item for item in sunucu_listesi if str(item[1]) not in gorulenler]
-    if not yeni_liste:
+    # Farklı numaraları al (aynı numara birden fazla gelmesin)
+    secilmis_numaralar = set()
+    yeni_liste = []
+    for item in sunucu_listesi:
+        n = str(item[1])
+        if n in secilmis_numaralar:
+            continue
+        if n in gorulenler:
+            continue
+        secilmis_numaralar.add(n)
+        yeni_liste.append(item)
+        if len(yeni_liste) >= adet:
+            break
+
+    # Yeterli yeni numara yoksa görülenleri sıfırla
+    if len(yeni_liste) < adet:
         kullanici["gorulen_numaralar"] = []
         data["kullanicilar"][str(user_id)] = kullanici
         veri_kaydet(data)
-        yeni_liste = sunucu_listesi
+        for item in sunucu_listesi:
+            n = str(item[1])
+            if n in secilmis_numaralar:
+                continue
+            secilmis_numaralar.add(n)
+            yeni_liste.append(item)
+            if len(yeni_liste) >= adet:
+                break
 
-    secilen = random.choice(yeni_liste)
+    if not yeni_liste:
+        return []
 
+    # Kullanıcının görülen numaralarına ekle
     yeni_gorulen = kullanici.get("gorulen_numaralar", [])
-    yeni_gorulen.append(str(secilen[1]))
+    for item in yeni_liste:
+        yeni_gorulen.append(str(item[1]))
     if len(yeni_gorulen) > GORULEN_LIMIT:
         yeni_gorulen = yeni_gorulen[-GORULEN_LIMIT:]
     kullanici["gorulen_numaralar"] = yeni_gorulen
     data["kullanicilar"][str(user_id)] = kullanici
     veri_kaydet(data)
 
-    numara = str(secilen[1])
-    servis_adi = str(secilen[0])
+    return [_numara_bilgi_paketle(item, sunucu) for item in yeni_liste]
 
-    servis_l = servis_adi.lower()
-    if any(k in servis_l for k in WHATSAPP_KEYWORDS):
-        servis_tip = "WhatsApp"
-        servis_ikon = "💚"
-    elif any(k in servis_l for k in TELEGRAM_KEYWORDS):
-        servis_tip = "Telegram"
-        servis_ikon = "✈️"
-    else:
-        servis_tip = servis_adi
-        servis_ikon = "💬"
-
-    return {
-        "servis": servis_adi,
-        "servis_tip": servis_tip,
-        "servis_ikon": servis_ikon,
-        "numara": numara,
-        "mesaj": str(secilen[2]) if len(secilen) > 2 else "",
-        "tarih": str(secilen[3]) if len(secilen) > 3 else "",
-        "ulke": ulke_bul(numara),
-        "fiyat": random.choice(FIYAT_HAVUZU),
-        "sunucu": sunucu
-    }
 
 def kod_ayikla(mesaj):
     patterns = [
@@ -591,15 +631,17 @@ async def sms_bekle(context: ContextTypes.DEFAULT_TYPE):
             )
 
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 Yeni Numara Al", callback_data="numara_al")],
+            [InlineKeyboardButton("🔄 Yeni Numara Al", callback_data="numara_al_menu")],
             [InlineKeyboardButton("🔙 Ana Menü", callback_data="geri_menu")]
         ])
 
+        # 1) Kullanıcıya gönder
         await context.bot.send_message(
             chat_id=order["chat_id"], text=text,
             reply_markup=keyboard, parse_mode="Markdown"
         )
 
+        # 2) Log kanalına gönder
         await log_gonder(context, "YENİ KOD DÜŞTÜ",
             f"👤 **Kullanıcı:** `{order_id}`\n"
             f"🌍 **Ülke:** {order.get('ulke', '-')}\n"
@@ -673,8 +715,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"   👋  **MERHABA {user.first_name.upper()}!**\n"
             f"╚══════════════════════════╝\n\n"
             f"📢 **Duyuru:**\n_{data['duyuru']}_\n\n"
-            f"🚀 **Sunucu 1** — Aktif numaralar (Önerilen)\n"
-            f"📡 **Sunucu 2** — Yedek numaralar\n\n"
             f"💎 Aşağıdan seç:",
             reply_markup=ana_menu(),
             parse_mode="Markdown"
@@ -723,6 +763,31 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await query.edit_message_text("❌ Hala kanallara katılmadınız!")
 
+        elif cdata == "numara_al_menu":
+            await query.answer()
+            if user_data.get("ban"):
+                await query.edit_message_text("🚫 Hesabınız banlı!")
+                return
+
+            aktif = data["siparisler"].get(str(user_id))
+            if aktif and aktif["durum"] in ["aktif", "sms_geldi"]:
+                await query.answer("⚠️ Zaten aktif siparişin var!", show_alert=True)
+                return
+
+            await query.edit_message_text(
+                "╔══════════════════════════╗\n"
+                "   📱  **NUMARA AL**\n"
+                "╚══════════════════════════╝\n\n"
+                "💎 **Hangi sunucudan numara almak istersin?**\n\n"
+                "🚀 **Sunucu 1** — Aktif numaralar\n"
+                "     _(WhatsApp, Telegram, Instagram, vs.)_\n\n"
+                "📡 **Sunucu 2** — Yedek numaralar\n"
+                "     _(Diğer ülke ve servisler)_\n\n"
+                "👇 Aşağıdan seç:",
+                reply_markup=sunucu_menu(),
+                parse_mode="Markdown"
+            )
+
         elif cdata in ("sunucu_1", "sunucu_2", "numara_al"):
             await query.answer()
             if user_data.get("ban"):
@@ -737,18 +802,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if cdata == "sunucu_2":
                 sunucu = 2
                 sunucu_adi = "📡 Sunucu 2"
-                await query.edit_message_text("📡 Sunucu 2'den numara getiriliyor...")
             else:
                 sunucu = 1
                 sunucu_adi = "🚀 Sunucu 1 (Önerilen)"
-                await query.edit_message_text("🚀 Sunucu 1'den numara getiriliyor...")
 
-            numara = tek_numara_getir(user_id, sunucu=sunucu)
-            if not numara:
+            await query.edit_message_text(f"⏳ **{sunucu_adi}**'den numaralar getiriliyor...", parse_mode="Markdown")
+
+            numaralar = coklu_numara_getir(user_id, sunucu=sunucu, adet=NUMARA_SAYISI)
+
+            if not numaralar:
                 keyboard = InlineKeyboardMarkup([
                     [InlineKeyboardButton("🚀 Sunucu 1", callback_data="sunucu_1"),
                      InlineKeyboardButton("📡 Sunucu 2", callback_data="sunucu_2")],
-                    [InlineKeyboardButton("🔙 Ana Menü", callback_data="geri_menu")]
+                    [InlineKeyboardButton("🔙 Geri", callback_data="geri_menu")]
                 ])
                 await query.edit_message_text(
                     f"❌ **{sunucu_adi}**'da uygun numara bulunamadı.\nDiğer sunucuyu dene 👇",
@@ -757,55 +823,68 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-            data["gecici_numaralar"][str(user_id)] = [numara]
+            # 3 numarayı veri'ye kaydet
+            data["gecici_numaralar"][str(user_id)] = numaralar
             veri_kaydet(data)
 
             user_puan = user_data.get("puan", 0)
-            yeterli = user_puan >= numara["fiyat"]
             sunucu_etiketi = "🚀 **Sunucu 1** — Önerilen" if sunucu == 1 else "📡 **Sunucu 2**"
 
             text = (
                 "╔══════════════════════════╗\n"
-                "    📱  **NUMARA HAZIR**\n"
+                "   📱  **NUMARALAR HAZIR**\n"
                 "╚══════════════════════════╝\n\n"
-                f"{sunucu_etiketi}\n\n"
-                f"🌍 Ülke: {numara['ulke']}\n"
-                f"📞 Numara: `{numara['numara']}`\n"
-                f"{numara['servis_ikon']} Servis: **{numara['servis_tip']}**\n"
-                f"💎 Fiyat: **{numara['fiyat']} Puan**\n\n"
-                f"💰 Puanın: **{user_puan}**"
+                f"{sunucu_etiketi}\n"
+                f"💰 **Puanın:** {user_puan}\n\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+            )
+            for i, n in enumerate(numaralar):
+                text += (
+                    f"**{i+1}.** {n['servis_ikon']} **{n['servis_tip']}**\n"
+                    f"    🌍 {n['ulke']}\n"
+                    f"    📞 `{n['numara']}`\n"
+                    f"    💎 **{n['fiyat']} Puan**\n\n"
+                )
+            text += "👇 **Numara seç:**"
+
+            keyboard_rows = []
+            for i, n in enumerate(numaralar):
+                keyboard_rows.append([
+                    InlineKeyboardButton(
+                        f"✅ {i+1}. {n['servis_tip']} — {n['fiyat']}💎",
+                        callback_data=f"numara_sec_{i}"
+                    )
+                ])
+            keyboard_rows.append([
+                InlineKeyboardButton("🔄 Başka Numaralar", callback_data=f"sunucu_{sunucu}")
+            ])
+            keyboard_rows.append([
+                InlineKeyboardButton("🔙 Geri", callback_data="geri_menu")
+            ])
+
+            await query.edit_message_text(
+                text,
+                reply_markup=InlineKeyboardMarkup(keyboard_rows),
+                parse_mode="Markdown"
             )
 
-            if yeterli:
-                keyboard = InlineKeyboardMarkup([
-                    [InlineKeyboardButton(f"✅ Satın Al ({numara['fiyat']} 💎)", callback_data="satin_al_0")],
-                    [InlineKeyboardButton("🔄 Başka Numara", callback_data=f"sunucu_{sunucu}")],
-                    [InlineKeyboardButton("🔙 Geri", callback_data="geri_menu")]
-                ])
-            else:
-                text += f"\n\n❌ **Yetersiz puan!** En az {numara['fiyat']} puan gerekli."
-                keyboard = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔄 Başka Numara", callback_data=f"sunucu_{sunucu}")],
-                    [InlineKeyboardButton("🔙 Geri", callback_data="geri_menu")]
-                ])
-
-            await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
-
-        elif cdata.startswith("satin_al_"):
+        elif cdata.startswith("numara_sec_"):
             await query.answer()
+            idx = int(cdata.replace("numara_sec_", ""))
             gecici = data.get("gecici_numaralar", {}).get(str(user_id), [])
-            if not gecici:
+            if not gecici or idx >= len(gecici):
                 await query.answer("❌ Numara bulunamadı!", show_alert=True)
                 return
 
-            secilen = gecici[0]
+            secilen = gecici[idx]
             fiyat = secilen["fiyat"]
 
             if user_data.get("puan", 0) < fiyat:
-                await query.answer(f"❌ {fiyat} puan gerekli.", show_alert=True)
+                await query.answer(f"❌ {fiyat} puan gerekli. Puanın: {user_data.get('puan', 0)}", show_alert=True)
                 return
 
             user_data["puan"] -= fiyat
+            data["kullanicilar"][str(user_id)] = user_data
 
             await query.edit_message_text("⏳ Mevcut mesajlar taranıyor...")
             eski_imzalar = numaraya_ait_mevcut_imzalar(secilen["numara"])
@@ -1161,15 +1240,12 @@ def run_flask_process():
 #              🚀 BAŞLAT
 # ═══════════════════════════════════════════
 def main():
-    # Flask'ı AYRI PROCESS olarak başlat
     flask_proc = multiprocessing.Process(target=run_flask_process, daemon=True)
     flask_proc.start()
     logger.info(f"Flask process başlatıldı (PID: {flask_proc.pid})")
 
-    import time
     time.sleep(3)
 
-    # Telegram bot ANA PROCESS'te
     logger.info("Telegram bot başlatılıyor...")
     app = Application.builder().token(BOT_TOKEN).build()
 
