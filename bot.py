@@ -21,7 +21,10 @@ from telegram.ext import (
 #                ⚙️ AYARLAR
 # ═══════════════════════════════════════════
 BOT_TOKEN = "8361049874:AAEG_-938EZeaf7UaRBFjRuwSuMgHfnbtCM"
-API_URL = "https://numberpanel.tech/api/lifetime"
+API_URLS = [
+    "https://numberpanel.tech/api/lifetime",
+    "http://194.238.28.236:8000/container"
+]
 ADMIN_IDS = [8967909400, 8913966694]
 LOG_KANAL_ID = -1003812660420
 PORT = int(os.environ.get("PORT", "8080"))
@@ -113,6 +116,13 @@ def ulke_bul(numara: str) -> str:
         if kod in ULKE_KODLARI:
             return ULKE_KODLARI[kod]
     return f"🌍 +{temiz[:3]}"
+
+def format_numara(numara: str) -> str:
+    """Numaranın başına + ekler (yoksa)."""
+    temiz = re.sub(r"\D", "", str(numara))
+    if not temiz:
+        return str(numara)
+    return "+" + temiz
 
 def sunucu_bul(servis: str, numara: str) -> int:
     servis_l = str(servis).lower()
@@ -370,14 +380,24 @@ def kisi_listesi_ekrani(sayfa=0):
 #              📡 API FONKSİYONLARI
 # ═══════════════════════════════════════════
 def api_veri_cek():
-    try:
-        r = requests.get(API_URL, timeout=15)
-        if r.status_code != 200:
-            return []
-        return r.json()
-    except Exception as e:
-        logger.error(f"[api_veri_cek] {e}")
-        return []
+    """Tüm API kaynaklarından veri çeker ve birleştirir."""
+    tum = []
+    for url in API_URLS:
+        try:
+            r = requests.get(url, timeout=15)
+            if r.status_code != 200:
+                logger.warning(f"[api_veri_cek] {url} HTTP {r.status_code}")
+                continue
+            data = r.json()
+            if isinstance(data, list):
+                tum.extend(data)
+                logger.info(f"[api_veri_cek] {url} → {len(data)} kayıt")
+            else:
+                logger.warning(f"[api_veri_cek] {url} → liste değil: {type(data)}")
+        except Exception as e:
+            logger.error(f"[api_veri_cek] {url} hata: {e}")
+            continue
+    return tum
 
 def numaraya_ait_mevcut_imzalar(numara):
     imzalar = set()
@@ -407,7 +427,8 @@ def bu_numaraya_yeni_mesaj_var_mi(numara, eski_imzalar):
 
 
 def _numara_bilgi_paketle(secilen, sunucu):
-    numara = str(secilen[1])
+    numara_raw = str(secilen[1])
+    numara = format_numara(numara_raw)
     servis_adi = str(secilen[0])
     servis_l = servis_adi.lower()
     if any(k in servis_l for k in WHATSAPP_KEYWORDS):
@@ -424,9 +445,10 @@ def _numara_bilgi_paketle(secilen, sunucu):
         "servis_tip": servis_tip,
         "servis_ikon": servis_ikon,
         "numara": numara,
+        "numara_raw": numara_raw,
         "mesaj": str(secilen[2]) if len(secilen) > 2 else "",
         "tarih": str(secilen[3]) if len(secilen) > 3 else "",
-        "ulke": ulke_bul(numara),
+        "ulke": ulke_bul(numara_raw),
         "fiyat": random.choice(FIYAT_HAVUZU),
         "sunucu": sunucu
     }
@@ -842,13 +864,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"    📞 `{n['numara']}`\n"
                     f"    💎 **{n['fiyat']} Puan**\n\n"
                 )
-            text += "👇 **Numara seç:**"
+            text += "👇 **Satın almak istediğin numarayı seç:**"
 
             keyboard_rows = []
             for i, n in enumerate(numaralar):
                 keyboard_rows.append([
                     InlineKeyboardButton(
-                        f"✅ {i+1}. {n['servis_tip']} — {n['fiyat']}💎",
+                        f"✅ Satın Al — {i+1}. {n['servis_tip']} ({n['fiyat']}💎)",
                         callback_data=f"numara_sec_{i}"
                     )
                 ])
@@ -884,11 +906,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             data["kullanicilar"][str(user_id)] = user_data
 
             await query.edit_message_text("⏳ Mevcut mesajlar taranıyor...")
-            eski_imzalar = numaraya_ait_mevcut_imzalar(secilen["numara"])
+            eski_imzalar = numaraya_ait_mevcut_imzalar(secilen["numara_raw"])
 
             order_id = str(user_id)
             data["siparisler"][order_id] = {
                 "numara": secilen["numara"],
+                "numara_raw": secilen["numara_raw"],
                 "servis": secilen["servis"],
                 "mesaj": secilen["mesaj"],
                 "tarih": secilen["tarih"],
@@ -1226,7 +1249,8 @@ def health():
         "service": "vantorium-bot",
         "time": datetime.now().isoformat(),
         "users": len(data.get("kullanicilar", {})),
-        "orders": len(data.get("siparisler", {}))
+        "orders": len(data.get("siparisler", {})),
+        "api_sources": len(API_URLS)
     }), 200
 
 def run_flask_process():
