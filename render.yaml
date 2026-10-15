@@ -1,18 +1,10 @@
 services:
-  - type: worker
+  - type: web
     name: vantorium-bot
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
     envVars:
-      - key: BOT_TOKEN
-        sync: false
-      - key: API_URL
-        value: https://numberpanel.tech/api/lifetime
-      - key: ADMIN_IDS
-        value: "8967909400,8913966694"
-      - key: LOG_KANAL_ID
-        value: "-1003812660420"
       - key: PYTHON_VERSION
         value: "3.11.0"
