@@ -7,6 +7,7 @@ import re
 import hashlib
 import threading
 import asyncio
+import multiprocessing
 from datetime import datetime
 from flask import Flask, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -161,7 +162,7 @@ async def log_gonder(context, baslik, detay, ikon="📌"):
             parse_mode="Markdown"
         )
     except Exception as e:
-        print(f"[log_gonder] {e}")
+        logger.error(f"[log_gonder] {e}")
 
 # ═══════════════════════════════════════════
 #              🛠 YARDIMCILAR
@@ -187,9 +188,11 @@ async def kanal_kontrol(context, user_id):
         try:
             member = await context.bot.get_chat_member(chat_id=kanal_id, user_id=user_id)
             if member.status in ["left", "kicked"]:
+                logger.info(f"[kanal_kontrol] {user_id} → {kanal_id}: {member.status}")
                 return False
         except Exception as e:
-            print(f"[kanal_kontrol] {kanal_id} hata: {e}")
+            logger.warning(f"[kanal_kontrol] {kanal_id} hata: {e} — geçiliyor")
+            continue
     return True
 
 def admin_mi(user_id):
@@ -249,7 +252,7 @@ async def referans_bildirim_gonder(context, davet_eden_id, yeni_kullanici):
             reply_markup=keyboard, parse_mode="Markdown"
         )
     except Exception as e:
-        print(f"[referans_bildirim] {e}")
+        logger.error(f"[referans_bildirim] {e}")
 
     try:
         await log_gonder(
@@ -361,7 +364,7 @@ def api_veri_cek():
             return []
         return r.json()
     except Exception as e:
-        print(f"[api_veri_cek] {e}")
+        logger.error(f"[api_veri_cek] {e}")
         return []
 
 def numaraya_ait_mevcut_imzalar(numara):
@@ -492,7 +495,7 @@ async def iade_aktif_et(context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
     except Exception as e:
-        print(f"[iade_aktif_et] {e}")
+        logger.error(f"[iade_aktif_et] {e}")
 
 async def otomatik_iptal(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
@@ -521,7 +524,7 @@ async def otomatik_iptal(context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
     except Exception as e:
-        print(f"[otomatik_iptal] {e}")
+        logger.error(f"[otomatik_iptal] {e}")
 
     await log_gonder(context, "SİPARİŞ İPTAL",
         f"👤 **Kullanıcı:** `{order_id}`\n"
@@ -617,391 +620,413 @@ async def sms_bekle(context: ContextTypes.DEFAULT_TYPE):
 #              🚀 KOMUTLAR
 # ═══════════════════════════════════════════
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    args = context.args
-    referans_eden = None
-    if args and args[0].startswith("ref_"):
-        try:
-            referans_eden = int(args[0].split("_")[1])
-        except Exception:
-            referans_eden = None
+    try:
+        logger.info(f"[START] user_id={update.effective_user.id}")
+        user = update.effective_user
+        args = context.args
+        referans_eden = None
+        if args and args[0].startswith("ref_"):
+            try:
+                referans_eden = int(args[0].split("_")[1])
+            except Exception:
+                referans_eden = None
 
-    yeni_kayit = kullanici_kayit(user.id, referans_eden)
+        yeni_kayit = kullanici_kayit(user.id, referans_eden)
 
-    if yeni_kayit:
-        await log_gonder(context, "YENİ KULLANICI",
-            f"👤 **İsim:** {user.first_name}\n"
-            f"🆔 **ID:** `{user.id}`\n"
-            f"🔗 **Username:** @{user.username if user.username else '-'}",
-            ikon="🆕")
+        if yeni_kayit:
+            await log_gonder(context, "YENİ KULLANICI",
+                f"👤 **İsim:** {user.first_name}\n"
+                f"🆔 **ID:** `{user.id}`\n"
+                f"🔗 **Username:** @{user.username if user.username else '-'}",
+                ikon="🆕")
 
-    if yeni_kayit and referans_eden and referans_eden != user.id:
-        if str(referans_eden) in data["kullanicilar"]:
-            await referans_bildirim_gonder(context, referans_eden, user)
+        if yeni_kayit and referans_eden and referans_eden != user.id:
+            if str(referans_eden) in data["kullanicilar"]:
+                await referans_bildirim_gonder(context, referans_eden, user)
 
-    user_data = data["kullanicilar"].get(str(user.id), {})
+        user_data = data["kullanicilar"].get(str(user.id), {})
 
-    if user_data.get("ban"):
+        if user_data.get("ban"):
+            await update.message.reply_text(
+                "┌───────────────────────┐\n"
+                "    🚫  **BANLANDIN**\n"
+                "└───────────────────────┘",
+                parse_mode="Markdown"
+            )
+            return
+
+        # Kanal kontrolü
+        kanal_ok = await kanal_kontrol(context, user.id)
+        logger.info(f"[START] kanal_ok={kanal_ok}")
+        if not kanal_ok:
+            await update.message.reply_text(
+                "╔══════════════════════════╗\n"
+                "   ⚠️  **KANAL ZORUNLU**\n"
+                "╚══════════════════════════╝\n\n"
+                "Botu kullanmak için aşağıdaki\n"
+                "**3 kanala** katılman gerekiyor 👇",
+                reply_markup=kanal_menu()
+            )
+            return
+
         await update.message.reply_text(
-            "┌───────────────────────┐\n"
-            "    🚫  **BANLANDIN**\n"
-            "└───────────────────────┘",
+            f"╔══════════════════════════╗\n"
+            f"   👋  **MERHABA {user.first_name.upper()}!**\n"
+            f"╚══════════════════════════╝\n\n"
+            f"📢 **Duyuru:**\n_{data['duyuru']}_\n\n"
+            f"🚀 **Sunucu 1** — Aktif numaralar (Önerilen)\n"
+            f"📡 **Sunucu 2** — Yedek numaralar\n\n"
+            f"💎 Aşağıdan seç:",
+            reply_markup=ana_menu(),
             parse_mode="Markdown"
         )
-        return
+        logger.info(f"[START] Cevap gönderildi → {user.id}")
 
-    if not await kanal_kontrol(context, user.id):
-        await update.message.reply_text(
-            "╔══════════════════════════╗\n"
-            "   ⚠️  **KANAL ZORUNLU**\n"
-            "╚══════════════════════════╝\n\n"
-            "Botu kullanmak için aşağıdaki\n"
-            "**3 kanala** katılman gerekiyor 👇",
-            reply_markup=kanal_menu()
-        )
-        return
-
-    await update.message.reply_text(
-        f"╔══════════════════════════╗\n"
-        f"   👋  **MERHABA {user.first_name.upper()}!**\n"
-        f"╚══════════════════════════╝\n\n"
-        f"📢 **Duyuru:**\n_{data['duyuru']}_\n\n"
-        f"🚀 **Sunucu 1** — Aktif numaralar (Önerilen)\n"
-        f"📡 **Sunucu 2** — Yedek numaralar\n\n"
-        f"💎 Aşağıdan seç:",
-        reply_markup=ana_menu(),
-        parse_mode="Markdown"
-    )
+    except Exception as e:
+        logger.error(f"[START] HATA: {e}", exc_info=True)
+        try:
+            await update.message.reply_text(f"❌ Hata: {e}")
+        except:
+            pass
 
 # ═══════════════════════════════════════════
 #              🎛 CALLBACK HANDLER
 # ═══════════════════════════════════════════
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user_id = query.from_user.id
-    cdata = query.data
+    try:
+        query = update.callback_query
+        user_id = query.from_user.id
+        cdata = query.data
+        logger.info(f"[CALLBACK] user={user_id} data={cdata}")
 
-    if not cdata.startswith("iade"):
-        if not await kanal_kontrol(context, user_id):
+        if not cdata.startswith("iade"):
+            if not await kanal_kontrol(context, user_id):
+                await query.answer()
+                await query.edit_message_text(
+                    "⚠️ Lütfen önce 3 kanala da katılın!",
+                    reply_markup=kanal_menu()
+                )
+                return
+
+        user_data = data["kullanicilar"].get(str(user_id), {})
+
+        if cdata == "katildim":
+            await query.answer()
+            if await kanal_kontrol(context, user_id):
+                await query.edit_message_text(
+                    f"╔══════════════════════════╗\n"
+                    f"   ✅  **HOŞ GELDİN!**\n"
+                    f"╚══════════════════════════╝\n\n"
+                    f"📢 _{data['duyuru']}_",
+                    reply_markup=ana_menu(),
+                    parse_mode="Markdown"
+                )
+            else:
+                await query.edit_message_text("❌ Hala kanallara katılmadınız!")
+
+        elif cdata in ("sunucu_1", "sunucu_2", "numara_al"):
+            await query.answer()
+            if user_data.get("ban"):
+                await query.edit_message_text("🚫 Hesabınız banlı!")
+                return
+
+            aktif = data["siparisler"].get(str(user_id))
+            if aktif and aktif["durum"] in ["aktif", "sms_geldi"]:
+                await query.answer("⚠️ Zaten aktif siparişin var!", show_alert=True)
+                return
+
+            if cdata == "sunucu_2":
+                sunucu = 2
+                sunucu_adi = "📡 Sunucu 2"
+                await query.edit_message_text("📡 Sunucu 2'den numara getiriliyor...")
+            else:
+                sunucu = 1
+                sunucu_adi = "🚀 Sunucu 1 (Önerilen)"
+                await query.edit_message_text("🚀 Sunucu 1'den numara getiriliyor...")
+
+            numara = tek_numara_getir(user_id, sunucu=sunucu)
+            if not numara:
+                keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🚀 Sunucu 1", callback_data="sunucu_1", style="success"),
+                     InlineKeyboardButton("📡 Sunucu 2", callback_data="sunucu_2", style="primary")],
+                    [InlineKeyboardButton("🔙 Ana Menü", callback_data="geri_menu", style="danger")]
+                ])
+                await query.edit_message_text(
+                    f"❌ **{sunucu_adi}**'da uygun numara bulunamadı.\nDiğer sunucuyu dene 👇",
+                    reply_markup=keyboard,
+                    parse_mode="Markdown"
+                )
+                return
+
+            data["gecici_numaralar"][str(user_id)] = [numara]
+            veri_kaydet(data)
+
+            user_puan = user_data.get("puan", 0)
+            yeterli = user_puan >= numara["fiyat"]
+            sunucu_etiketi = "🚀 **Sunucu 1** — Önerilen" if sunucu == 1 else "📡 **Sunucu 2**"
+
+            text = (
+                "╔══════════════════════════╗\n"
+                "    📱  **NUMARA HAZIR**\n"
+                "╚══════════════════════════╝\n\n"
+                f"{sunucu_etiketi}\n\n"
+                f"🌍 Ülke: {numara['ulke']}\n"
+                f"📞 Numara: `{numara['numara']}`\n"
+                f"{numara['servis_ikon']} Servis: **{numara['servis_tip']}**\n"
+                f"💎 Fiyat: **{numara['fiyat']} Puan**\n\n"
+                f"💰 Puanın: **{user_puan}**"
+            )
+
+            if yeterli:
+                keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton(f"✅ Satın Al ({numara['fiyat']} 💎)", callback_data="satin_al_0", style="success")],
+                    [InlineKeyboardButton("🔄 Başka Numara", callback_data=f"sunucu_{sunucu}", style="primary")],
+                    [InlineKeyboardButton("🔙 Geri", callback_data="geri_menu", style="danger")]
+                ])
+            else:
+                text += f"\n\n❌ **Yetersiz puan!** En az {numara['fiyat']} puan gerekli."
+                keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 Başka Numara", callback_data=f"sunucu_{sunucu}", style="primary")],
+                    [InlineKeyboardButton("🔙 Geri", callback_data="geri_menu", style="danger")]
+                ])
+
+            await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+
+        elif cdata.startswith("satin_al_"):
+            await query.answer()
+            gecici = data.get("gecici_numaralar", {}).get(str(user_id), [])
+            if not gecici:
+                await query.answer("❌ Numara bulunamadı!", show_alert=True)
+                return
+
+            secilen = gecici[0]
+            fiyat = secilen["fiyat"]
+
+            if user_data.get("puan", 0) < fiyat:
+                await query.answer(f"❌ {fiyat} puan gerekli.", show_alert=True)
+                return
+
+            user_data["puan"] -= fiyat
+
+            await query.edit_message_text("⏳ Mevcut mesajlar taranıyor...")
+            eski_imzalar = numaraya_ait_mevcut_imzalar(secilen["numara"])
+
+            order_id = str(user_id)
+            data["siparisler"][order_id] = {
+                "numara": secilen["numara"],
+                "servis": secilen["servis"],
+                "mesaj": secilen["mesaj"],
+                "tarih": secilen["tarih"],
+                "ulke": secilen["ulke"],
+                "fiyat": fiyat,
+                "baslangic": datetime.now().isoformat(),
+                "durum": "aktif",
+                "chat_id": query.message.chat_id,
+                "message_id": query.message.message_id,
+                "eski_imzalar": list(eski_imzalar),
+                "sunucu": secilen.get("sunucu", 1)
+            }
+            if str(user_id) in data["gecici_numaralar"]:
+                del data["gecici_numaralar"][str(user_id)]
+            veri_kaydet(data)
+
+            text = (
+                "╔══════════════════════════╗\n"
+                "   🎉  **NUMARA ALINDI!**\n"
+                "╚══════════════════════════╝\n\n"
+                f"🌍 Ülke: {secilen['ulke']}\n"
+                f"📞 Numara: `{secilen['numara']}`\n"
+                f"{secilen['servis_ikon']} Servis: **{secilen['servis_tip']}**\n\n"
+                f"💸 Ödenen: **{fiyat} Puan**\n"
+                f"💳 Kalan: **{user_data['puan']} Puan**\n\n"
+                "┌──────────────────────┐\n"
+                "│  ⏳ SMS bekleniyor...\n"
+                "│  🔔 Kod düşünce anında gelir\n"
+                "└──────────────────────┘\n\n"
+                f"📸 {len(eski_imzalar)} eski mesaj kaydedildi\n"
+                "✅ Sadece **YENİ** SMS kabul edilecek\n\n"
+                "⏱️ İade: **1 dk sonra** aktif\n"
+                "⚠️ 15 dk içinde iade etmezsen puan yanar"
+            )
+
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("⏳ İade (1 dk bekleyin)", callback_data=f"iade_bekle_{order_id}", style="danger")]
+            ])
+
+            await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+
+            for name in (f"iade_aktif_{order_id}", f"iptal_{order_id}", f"sms_poll_{order_id}"):
+                for j in context.job_queue.get_jobs_by_name(name):
+                    j.schedule_removal()
+
+            context.job_queue.run_once(iade_aktif_et, when=IADE_BEKLEME_SN,
+                data={"order_id": order_id}, name=f"iade_aktif_{order_id}")
+            context.job_queue.run_once(otomatik_iptal, when=OTO_IPTAL_SN,
+                data={"order_id": order_id}, name=f"iptal_{order_id}")
+            context.job_queue.run_once(sms_bekle, when=SMS_POLL_INTERVAL,
+                data={"order_id": order_id}, name=f"sms_poll_{order_id}")
+
+            await log_gonder(context, "SİPARİŞ OLUŞTURULDU",
+                f"👤 **Kullanıcı:** `{user_id}`\n"
+                f"🌍 **Ülke:** {secilen['ulke']}\n"
+                f"📞 **Numara:** `{secilen['numara']}`\n"
+                f"💬 **Servis:** {secilen['servis_tip']}\n"
+                f"💎 **Ödenen:** {fiyat} puan\n"
+                f"🖥 **Sunucu:** {secilen.get('sunucu', 1)}",
+                ikon="💼")
+
+        elif cdata == "geri_menu":
             await query.answer()
             await query.edit_message_text(
-                "⚠️ Lütfen önce 3 kanala da katılın!",
-                reply_markup=kanal_menu()
-            )
-            return
-
-    user_data = data["kullanicilar"].get(str(user_id), {})
-
-    if cdata == "katildim":
-        await query.answer()
-        if await kanal_kontrol(context, user_id):
-            await query.edit_message_text(
                 f"╔══════════════════════════╗\n"
-                f"   ✅  **HOŞ GELDİN!**\n"
+                f"      🏠  **ANA MENÜ**\n"
                 f"╚══════════════════════════╝\n\n"
                 f"📢 _{data['duyuru']}_",
                 reply_markup=ana_menu(),
                 parse_mode="Markdown"
             )
-        else:
-            await query.edit_message_text("❌ Hala kanallara katılmadınız!")
 
-    elif cdata in ("sunucu_1", "sunucu_2", "numara_al"):
-        await query.answer()
-        if user_data.get("ban"):
-            await query.edit_message_text("🚫 Hesabınız banlı!")
-            return
+        elif cdata.startswith("iade_bekle_"):
+            await query.answer("⏳ İade 1 dakika sonra aktif olacak!", show_alert=True)
 
-        aktif = data["siparisler"].get(str(user_id))
-        if aktif and aktif["durum"] in ["aktif", "sms_geldi"]:
-            await query.answer("⚠️ Zaten aktif siparişin var!", show_alert=True)
-            return
+        elif cdata.startswith("iade_et_"):
+            order_id = cdata.replace("iade_et_", "")
+            if order_id not in data["siparisler"]:
+                await query.answer("❌ Sipariş yok!", show_alert=True)
+                return
+            order = data["siparisler"][order_id]
+            if order["durum"] != "aktif":
+                await query.answer("❌ Zaten kapatılmış!", show_alert=True)
+                return
+            gecen = (datetime.now() - datetime.fromisoformat(order["baslangic"])).total_seconds()
+            if gecen < IADE_BEKLEME_SN:
+                await query.answer("⏳ Henüz iade edilemez!", show_alert=True)
+                return
+            if gecen > OTO_IPTAL_SN:
+                await query.answer("❌ 15 dk geçti!", show_alert=True)
+                return
 
-        if cdata == "sunucu_2":
-            sunucu = 2
-            sunucu_adi = "📡 Sunucu 2"
-            await query.edit_message_text("📡 Sunucu 2'den numara getiriliyor...")
-        else:
-            sunucu = 1
-            sunucu_adi = "🚀 Sunucu 1 (Önerilen)"
-            await query.edit_message_text("🚀 Sunucu 1'den numara getiriliyor...")
+            if order_id in data["kullanicilar"]:
+                data["kullanicilar"][order_id]["puan"] += order.get("fiyat", 1)
+            order["durum"] = "iade_edildi"
+            veri_kaydet(data)
 
-        numara = tek_numara_getir(user_id, sunucu=sunucu)
-        if not numara:
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🚀 Sunucu 1", callback_data="sunucu_1", style="success"),
-                 InlineKeyboardButton("📡 Sunucu 2", callback_data="sunucu_2", style="primary")],
-                [InlineKeyboardButton("🔙 Ana Menü", callback_data="geri_menu", style="danger")]
-            ])
+            for name in (f"iptal_{order_id}", f"iade_aktif_{order_id}", f"sms_poll_{order_id}"):
+                for j in context.job_queue.get_jobs_by_name(name):
+                    j.schedule_removal()
+
+            await query.answer("✅ İade başarılı!")
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
             await query.edit_message_text(
-                f"❌ **{sunucu_adi}**'da uygun numara bulunamadı.\nDiğer sunucuyu dene 👇",
-                reply_markup=keyboard,
+                "╔══════════════════════════╗\n"
+                "   💰  **İADE BAŞARILI!**\n"
+                "╚══════════════════════════╝\n\n"
+                f"✅ **{order.get('fiyat', 1)} puan** geri yüklendi.",
+                reply_markup=geri_menu(),
                 parse_mode="Markdown"
             )
-            return
 
-        data["gecici_numaralar"][str(user_id)] = [numara]
-        veri_kaydet(data)
+            await log_gonder(context, "İADE YAPILDI",
+                f"👤 **Kullanıcı:** `{order_id}`\n"
+                f"📞 **Numara:** `{order['numara']}`\n"
+                f"💎 **İade:** {order.get('fiyat', 1)} puan",
+                ikon="💰")
 
-        user_puan = user_data.get("puan", 0)
-        yeterli = user_puan >= numara["fiyat"]
-        sunucu_etiketi = "🚀 **Sunucu 1** — Önerilen" if sunucu == 1 else "📡 **Sunucu 2**"
+        elif cdata == "profil":
+            await query.answer()
+            ban_durum = "🚫 Banlı" if user_data.get('ban') else "✅ Aktif"
+            text = (
+                "╔══════════════════════════╗\n"
+                "      👤  **PROFİLİM**\n"
+                "╚══════════════════════════╝\n\n"
+                f"🆔 ID: `{user_id}`\n"
+                f"💰 Puan: **{user_data.get('puan', 0)}**\n"
+                f"👥 Referans: **{user_data.get('referans', 0)}**\n"
+                f"📊 Durum: {ban_durum}"
+            )
+            await query.edit_message_text(text, reply_markup=geri_menu(), parse_mode="Markdown")
 
-        text = (
-            "╔══════════════════════════╗\n"
-            "    📱  **NUMARA HAZIR**\n"
-            "╚══════════════════════════╝\n\n"
-            f"{sunucu_etiketi}\n\n"
-            f"🌍 Ülke: {numara['ulke']}\n"
-            f"📞 Numara: `{numara['numara']}`\n"
-            f"{numara['servis_ikon']} Servis: **{numara['servis_tip']}**\n"
-            f"💎 Fiyat: **{numara['fiyat']} Puan**\n\n"
-            f"💰 Puanın: **{user_puan}**"
-        )
+        elif cdata == "referans":
+            await query.answer()
+            bot_username = (await context.bot.get_me()).username
+            ref_link = f"https://t.me/{bot_username}?start=ref_{user_id}"
+            text = (
+                "╔══════════════════════════╗\n"
+                "    🔗  **REFERANS LİNKİN**\n"
+                "╚══════════════════════════╝\n\n"
+                f"`{ref_link}`\n\n"
+                f"💎 Her davet = **{REFERANS_PUAN} puan**\n"
+                f"👥 Toplam: **{user_data.get('referans', 0)}**\n\n"
+                "🔔 Davet edilen bota girince sana\nbildirim gelir!"
+            )
+            await query.edit_message_text(text, reply_markup=geri_menu(), parse_mode="Markdown")
 
-        if yeterli:
+        elif cdata == "duyuru":
+            await query.answer()
+            await query.edit_message_text(
+                "╔══════════════════════════╗\n"
+                "      📢  **DUYURU**\n"
+                "╚══════════════════════════╝\n\n"
+                f"{data['duyuru']}",
+                reply_markup=geri_menu(), parse_mode="Markdown"
+            )
+
+        elif cdata == "admin_panel":
+            await query.answer()
+            if not admin_mi(user_id):
+                await query.edit_message_text("❌ Yetkin yok!")
+                return
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"✅ Satın Al ({numara['fiyat']} 💎)", callback_data="satin_al_0", style="success")],
-                [InlineKeyboardButton("🔄 Başka Numara", callback_data=f"sunucu_{sunucu}", style="primary")],
-                [InlineKeyboardButton("🔙 Geri", callback_data="geri_menu", style="danger")]
+                [InlineKeyboardButton("📢 Duyuru Yap", callback_data="admin_duyuru", style="primary")],
+                [InlineKeyboardButton("➕ Puan Ekle", callback_data="admin_puan_ekle", style="success"),
+                 InlineKeyboardButton("➖ Puan Eksilt", callback_data="admin_puan_eksilt", style="danger")],
+                [InlineKeyboardButton("🚫 Banla", callback_data="admin_banla", style="danger"),
+                 InlineKeyboardButton("✅ Ban Aç", callback_data="admin_ban_ac", style="success")],
+                [InlineKeyboardButton("👑 Admin Ekle", callback_data="admin_ekle", style="primary"),
+                 InlineKeyboardButton("🗑️ Admin Çıkar", callback_data="admin_cikar", style="danger")],
+                [InlineKeyboardButton("👥 Kişi Listesi", callback_data="kisi_listesi", style="primary")],
+                [InlineKeyboardButton("🔙 Ana Menü", callback_data="geri_menu", style="success")]
             ])
-        else:
-            text += f"\n\n❌ **Yetersiz puan!** En az {numara['fiyat']} puan gerekli."
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 Başka Numara", callback_data=f"sunucu_{sunucu}", style="primary")],
-                [InlineKeyboardButton("🔙 Geri", callback_data="geri_menu", style="danger")]
-            ])
+            await query.edit_message_text(
+                "╔══════════════════════════╗\n"
+                "     👑  **ADMIN PANELİ**\n"
+                "╚══════════════════════════╝\n\n"
+                "**Komutlar:**\n"
+                "`/puan_ekle <id> <miktar>`\n"
+                "`/puan_eksilt <id> <miktar>`\n"
+                "`/banla <id>` - `/ban_ac <id>`\n"
+                "`/admin_ekle <id>` - `/admin_cikar <id>`\n"
+                "`/duyuru <metin>`\n"
+                "`/kisiler` — tüm kullanıcı listesi",
+                reply_markup=keyboard, parse_mode="Markdown"
+            )
 
-        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+        elif cdata == "kisi_listesi":
+            await query.answer()
+            if not admin_mi(user_id):
+                await query.edit_message_text("❌ Yetkin yok!")
+                return
+            text, keyboard = kisi_listesi_ekrani(sayfa=0)
+            await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
 
-    elif cdata.startswith("satin_al_"):
-        await query.answer()
-        gecici = data.get("gecici_numaralar", {}).get(str(user_id), [])
-        if not gecici:
-            await query.answer("❌ Numara bulunamadı!", show_alert=True)
-            return
+        elif cdata.startswith("kisi_sayfa_"):
+            await query.answer()
+            if not admin_mi(user_id):
+                await query.edit_message_text("❌ Yetkin yok!")
+                return
+            sayfa = int(cdata.replace("kisi_sayfa_", ""))
+            text, keyboard = kisi_listesi_ekrani(sayfa=sayfa)
+            await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
 
-        secilen = gecici[0]
-        fiyat = secilen["fiyat"]
-
-        if user_data.get("puan", 0) < fiyat:
-            await query.answer(f"❌ {fiyat} puan gerekli.", show_alert=True)
-            return
-
-        user_data["puan"] -= fiyat
-
-        await query.edit_message_text("⏳ Mevcut mesajlar taranıyor...")
-        eski_imzalar = numaraya_ait_mevcut_imzalar(secilen["numara"])
-
-        order_id = str(user_id)
-        data["siparisler"][order_id] = {
-            "numara": secilen["numara"],
-            "servis": secilen["servis"],
-            "mesaj": secilen["mesaj"],
-            "tarih": secilen["tarih"],
-            "ulke": secilen["ulke"],
-            "fiyat": fiyat,
-            "baslangic": datetime.now().isoformat(),
-            "durum": "aktif",
-            "chat_id": query.message.chat_id,
-            "message_id": query.message.message_id,
-            "eski_imzalar": list(eski_imzalar),
-            "sunucu": secilen.get("sunucu", 1)
-        }
-        if str(user_id) in data["gecici_numaralar"]:
-            del data["gecici_numaralar"][str(user_id)]
-        veri_kaydet(data)
-
-        text = (
-            "╔══════════════════════════╗\n"
-            "   🎉  **NUMARA ALINDI!**\n"
-            "╚══════════════════════════╝\n\n"
-            f"🌍 Ülke: {secilen['ulke']}\n"
-            f"📞 Numara: `{secilen['numara']}`\n"
-            f"{secilen['servis_ikon']} Servis: **{secilen['servis_tip']}**\n\n"
-            f"💸 Ödenen: **{fiyat} Puan**\n"
-            f"💳 Kalan: **{user_data['puan']} Puan**\n\n"
-            "┌──────────────────────┐\n"
-            "│  ⏳ SMS bekleniyor...\n"
-            "│  🔔 Kod düşünce anında gelir\n"
-            "└──────────────────────┘\n\n"
-            f"📸 {len(eski_imzalar)} eski mesaj kaydedildi\n"
-            "✅ Sadece **YENİ** SMS kabul edilecek\n\n"
-            "⏱️ İade: **1 dk sonra** aktif\n"
-            "⚠️ 15 dk içinde iade etmezsen puan yanar"
-        )
-
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("⏳ İade (1 dk bekleyin)", callback_data=f"iade_bekle_{order_id}", style="danger")]
-        ])
-
-        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
-
-        for name in (f"iade_aktif_{order_id}", f"iptal_{order_id}", f"sms_poll_{order_id}"):
-            for j in context.job_queue.get_jobs_by_name(name):
-                j.schedule_removal()
-
-        context.job_queue.run_once(iade_aktif_et, when=IADE_BEKLEME_SN,
-            data={"order_id": order_id}, name=f"iade_aktif_{order_id}")
-        context.job_queue.run_once(otomatik_iptal, when=OTO_IPTAL_SN,
-            data={"order_id": order_id}, name=f"iptal_{order_id}")
-        context.job_queue.run_once(sms_bekle, when=SMS_POLL_INTERVAL,
-            data={"order_id": order_id}, name=f"sms_poll_{order_id}")
-
-        await log_gonder(context, "SİPARİŞ OLUŞTURULDU",
-            f"👤 **Kullanıcı:** `{user_id}`\n"
-            f"🌍 **Ülke:** {secilen['ulke']}\n"
-            f"📞 **Numara:** `{secilen['numara']}`\n"
-            f"💬 **Servis:** {secilen['servis_tip']}\n"
-            f"💎 **Ödenen:** {fiyat} puan\n"
-            f"🖥 **Sunucu:** {secilen.get('sunucu', 1)}",
-            ikon="💼")
-
-    elif cdata == "geri_menu":
-        await query.answer()
-        await query.edit_message_text(
-            f"╔══════════════════════════╗\n"
-            f"      🏠  **ANA MENÜ**\n"
-            f"╚══════════════════════════╝\n\n"
-            f"📢 _{data['duyuru']}_",
-            reply_markup=ana_menu(),
-            parse_mode="Markdown"
-        )
-
-    elif cdata.startswith("iade_bekle_"):
-        await query.answer("⏳ İade 1 dakika sonra aktif olacak!", show_alert=True)
-
-    elif cdata.startswith("iade_et_"):
-        order_id = cdata.replace("iade_et_", "")
-        if order_id not in data["siparisler"]:
-            await query.answer("❌ Sipariş yok!", show_alert=True)
-            return
-        order = data["siparisler"][order_id]
-        if order["durum"] != "aktif":
-            await query.answer("❌ Zaten kapatılmış!", show_alert=True)
-            return
-        gecen = (datetime.now() - datetime.fromisoformat(order["baslangic"])).total_seconds()
-        if gecen < IADE_BEKLEME_SN:
-            await query.answer("⏳ Henüz iade edilemez!", show_alert=True)
-            return
-        if gecen > OTO_IPTAL_SN:
-            await query.answer("❌ 15 dk geçti!", show_alert=True)
-            return
-
-        if order_id in data["kullanicilar"]:
-            data["kullanicilar"][order_id]["puan"] += order.get("fiyat", 1)
-        order["durum"] = "iade_edildi"
-        veri_kaydet(data)
-
-        for name in (f"iptal_{order_id}", f"iade_aktif_{order_id}", f"sms_poll_{order_id}"):
-            for j in context.job_queue.get_jobs_by_name(name):
-                j.schedule_removal()
-
-        await query.answer("✅ İade başarılı!")
+    except Exception as e:
+        logger.error(f"[CALLBACK] HATA: {e}", exc_info=True)
         try:
-            await query.edit_message_reply_markup(reply_markup=None)
-        except Exception:
+            await update.callback_query.answer(f"❌ Hata: {e}", show_alert=True)
+        except:
             pass
-        await query.edit_message_text(
-            "╔══════════════════════════╗\n"
-            "   💰  **İADE BAŞARILI!**\n"
-            "╚══════════════════════════╝\n\n"
-            f"✅ **{order.get('fiyat', 1)} puan** geri yüklendi.",
-            reply_markup=geri_menu(),
-            parse_mode="Markdown"
-        )
-
-        await log_gonder(context, "İADE YAPILDI",
-            f"👤 **Kullanıcı:** `{order_id}`\n"
-            f"📞 **Numara:** `{order['numara']}`\n"
-            f"💎 **İade:** {order.get('fiyat', 1)} puan",
-            ikon="💰")
-
-    elif cdata == "profil":
-        await query.answer()
-        ban_durum = "🚫 Banlı" if user_data.get('ban') else "✅ Aktif"
-        text = (
-            "╔══════════════════════════╗\n"
-            "      👤  **PROFİLİM**\n"
-            "╚══════════════════════════╝\n\n"
-            f"🆔 ID: `{user_id}`\n"
-            f"💰 Puan: **{user_data.get('puan', 0)}**\n"
-            f"👥 Referans: **{user_data.get('referans', 0)}**\n"
-            f"📊 Durum: {ban_durum}"
-        )
-        await query.edit_message_text(text, reply_markup=geri_menu(), parse_mode="Markdown")
-
-    elif cdata == "referans":
-        await query.answer()
-        bot_username = (await context.bot.get_me()).username
-        ref_link = f"https://t.me/{bot_username}?start=ref_{user_id}"
-        text = (
-            "╔══════════════════════════╗\n"
-            "    🔗  **REFERANS LİNKİN**\n"
-            "╚══════════════════════════╝\n\n"
-            f"`{ref_link}`\n\n"
-            f"💎 Her davet = **{REFERANS_PUAN} puan**\n"
-            f"👥 Toplam: **{user_data.get('referans', 0)}**\n\n"
-            "🔔 Davet edilen bota girince sana\nbildirim gelir!"
-        )
-        await query.edit_message_text(text, reply_markup=geri_menu(), parse_mode="Markdown")
-
-    elif cdata == "duyuru":
-        await query.answer()
-        await query.edit_message_text(
-            "╔══════════════════════════╗\n"
-            "      📢  **DUYURU**\n"
-            "╚══════════════════════════╝\n\n"
-            f"{data['duyuru']}",
-            reply_markup=geri_menu(), parse_mode="Markdown"
-        )
-
-    elif cdata == "admin_panel":
-        await query.answer()
-        if not admin_mi(user_id):
-            await query.edit_message_text("❌ Yetkin yok!")
-            return
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📢 Duyuru Yap", callback_data="admin_duyuru", style="primary")],
-            [InlineKeyboardButton("➕ Puan Ekle", callback_data="admin_puan_ekle", style="success"),
-             InlineKeyboardButton("➖ Puan Eksilt", callback_data="admin_puan_eksilt", style="danger")],
-            [InlineKeyboardButton("🚫 Banla", callback_data="admin_banla", style="danger"),
-             InlineKeyboardButton("✅ Ban Aç", callback_data="admin_ban_ac", style="success")],
-            [InlineKeyboardButton("👑 Admin Ekle", callback_data="admin_ekle", style="primary"),
-             InlineKeyboardButton("🗑️ Admin Çıkar", callback_data="admin_cikar", style="danger")],
-            [InlineKeyboardButton("👥 Kişi Listesi", callback_data="kisi_listesi", style="primary")],
-            [InlineKeyboardButton("🔙 Ana Menü", callback_data="geri_menu", style="success")]
-        ])
-        await query.edit_message_text(
-            "╔══════════════════════════╗\n"
-            "     👑  **ADMIN PANELİ**\n"
-            "╚══════════════════════════╝\n\n"
-            "**Komutlar:**\n"
-            "`/puan_ekle <id> <miktar>`\n"
-            "`/puan_eksilt <id> <miktar>`\n"
-            "`/banla <id>` - `/ban_ac <id>`\n"
-            "`/admin_ekle <id>` - `/admin_cikar <id>`\n"
-            "`/duyuru <metin>`\n"
-            "`/kisiler` — tüm kullanıcı listesi",
-            reply_markup=keyboard, parse_mode="Markdown"
-        )
-
-    elif cdata == "kisi_listesi":
-        await query.answer()
-        if not admin_mi(user_id):
-            await query.edit_message_text("❌ Yetkin yok!")
-            return
-        text, keyboard = kisi_listesi_ekrani(sayfa=0)
-        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
-
-    elif cdata.startswith("kisi_sayfa_"):
-        await query.answer()
-        if not admin_mi(user_id):
-            await query.edit_message_text("❌ Yetkin yok!")
-            return
-        sayfa = int(cdata.replace("kisi_sayfa_", ""))
-        text, keyboard = kisi_listesi_ekrani(sayfa=sayfa)
-        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
 
 # ═══════════════════════════════════════════
 #              👑 ADMIN KOMUTLARI
@@ -1111,7 +1136,7 @@ async def kisiler_komutu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def log_kaydet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message and update.message.text:
-        print(f"[{datetime.now()}] {update.effective_user.id}: {update.message.text}")
+        logger.info(f"[MSG] {update.effective_user.id}: {update.message.text}")
 
 # ═══════════════════════════════════════════
 #          🌐 FLASK — RENDER HEALTH CHECK
@@ -1129,7 +1154,7 @@ def health():
         "orders": len(data.get("siparisler", {}))
     }), 200
 
-def run_flask():
+def run_flask_process():
     logger.info(f"Flask başlatılıyor: port {PORT}")
     flask_app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False, threaded=True)
 
@@ -1137,21 +1162,16 @@ def run_flask():
 #              🚀 BAŞLAT
 # ═══════════════════════════════════════════
 def main():
-    # ⚠️ Python 3.14+ için event loop oluştur (yoksa run_polling patlar)
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_closed():
-            raise RuntimeError("closed")
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+    # ═══ Flask'ı AYRI PROCESS olarak başlat (event loop'u bozmasın) ═══
+    flask_proc = multiprocessing.Process(target=run_flask_process, daemon=True)
+    flask_proc.start()
+    logger.info(f"Flask process başlatıldı (PID: {flask_proc.pid})")
 
-    # Flask'ı arka planda başlat
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    logger.info("Flask thread başlatıldı")
+    import time
+    time.sleep(3)  # Flask ayağa kalksın
 
-    # Telegram bot
+    # ═══ Telegram bot ANA PROCESS'te (temiz event loop) ═══
+    logger.info("Telegram bot başlatılıyor...")
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -1170,7 +1190,8 @@ def main():
     logger.info("   🤖  BOT ÇALIŞIYOR...")
     logger.info("╚══════════════════════════╝")
 
-    app.run_polling(drop_pending_updates=True, close_loop=False)
+    # ═══ Ana thread'de polling ═══
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
