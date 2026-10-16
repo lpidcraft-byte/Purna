@@ -32,9 +32,10 @@ PORT = int(os.environ.get("PORT", "8080"))
 KANALLAR = [
     "https://t.me/vantoriumbanned",
     "https://t.me/zyrvenilkyazanss",
-    "https://t.me/otpbotlogss"
+    "https://t.me/otpbotlogss",
+    "https://t.me/pubghilekanalix"
 ]
-KANAL_IDLERI = [-1003947388912, -1004326807501, -1003812660420]
+KANAL_IDLERI = [-1003947388912, -1004326807501, -1003812660420, -1003995457732]
 VERI_DOSYASI = "bot_data.json"
 
 IADE_BEKLEME_SN = 60
