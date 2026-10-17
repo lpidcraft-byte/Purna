@@ -20,7 +20,7 @@ from telegram.ext import (
 # ═══════════════════════════════════════════
 #                ⚙️ AYARLAR
 # ═══════════════════════════════════════════
-BOT_TOKEN = "8361049874:AAEG_-938EZeaf7UaRBFjRuwSuMgHfnbtCM"
+BOT_TOKEN = "8361049874:AAE59zpfzyZk24nILTRytIsiCEr1x01E9mo"
 API_URLS = [
     "https://numberpanel.tech/api/lifetime",
     "http://194.238.28.236:8000/container"
