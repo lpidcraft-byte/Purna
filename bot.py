@@ -24,6 +24,8 @@ BOT_TOKEN = "8361049874:AAE59zpfzyZk24nILTRytIsiCEr1x01E9mo"
 API_URLS = [
     "https://numberpanel.tech/api/lifetime",
     "http://194.238.28.236:8000/container"
+    "http://194.238.28.236:8000/container"
+    "http://62.169.28.71/client.php?token=pbqDNx2Mt1Q2ggnrvBz2tEM-aSsx099a&limit=100"
 ]
 ADMIN_IDS = [8967909400, 8913966694]
 LOG_KANAL_ID = -1003812660420
