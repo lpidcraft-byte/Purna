@@ -9,888 +9,1729 @@ const rateLimit = require('express-rate-limit');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+app.set('trust proxy', 1);
 
-// --- ANAHTARLAR ---
-const JWT_SECRET = '75N6Wtyf4KtOgv1CQ6ici1rZz30pBxsHGxSYw9JcDPn';
-const ENCRYPTION_KEY = 'd0ec01759c5c3498b69340e0343bbdf3e5830faed6beca2389339800debb6990';
+// VANTORIUM GÜVENLİK ANAHTARLARI
+const JWT_SECRET = process.env.JWT_SECRET || '75N6Wtyf4KtOgv1CQ6ici1rZz30pBxsHGxSYw9JcDPn';
+const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'd0ec01759c5c3498b69340e0343bbdf3e5830faed6beca2389339800debb6990';
+
+if (!JWT_SECRET || JWT_SECRET.length < 32)
+  throw new Error('JWT_SECRET en az 32 karakter olmalıdır.');
+
+if (!ENCRYPTION_KEY || !/^[a-fA-F0-9]{64}$/.test(ENCRYPTION_KEY))
+  throw new Error('ENCRYPTION_KEY 64 karakterlik hexadecimal anahtar olmalıdır.');
+
 const key = CryptoJS.enc.Hex.parse(ENCRYPTION_KEY);
 
-const DB_FILE = path.join(__dirname, 'data.enc');
-const UPLOAD_DIR = path.join(__dirname, 'uploads');
+const DATA_DIR = process.env.DATA_DIR || (process.env.RENDER ? '/var/data' : __dirname);
+fs.mkdirSync(DATA_DIR, { recursive: true });
 
-if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR);
+const DB_FILE = path.join(DATA_DIR, 'data.enc');
+const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
-// ---------- Şifreli JSON Veritabanı ----------
+// Eski veritabanını kalıcı depolama alanına taşı.
+const legacyDB = path.join(__dirname, 'data.enc');
+
+if (
+  !fs.existsSync(DB_FILE) &&
+  path.resolve(legacyDB) !== path.resolve(DB_FILE) &&
+  fs.existsSync(legacyDB)
+) {
+  fs.copyFileSync(legacyDB, DB_FILE);
+  console.log('Eski data.enc kalıcı depolama alanına kopyalandı.');
+}
+
+function emptyDB() {
+  return {
+    users: [],
+    projects: [],
+    files: [],
+    captchas: {},
+    appData: [],
+    appUsers: [],
+    bannedIps: [],
+    verifyAttempts: {}
+  };
+}
+
 function loadDB() {
-if (!fs.existsSync(DB_FILE)) return { users: [], projects: [], files: [], captchas: [], appData: [], bannedIps: [], verifyAttempts: {} };
-try {
-const encrypted = fs.readFileSync(DB_FILE, 'utf8');
-const decrypted = CryptoJS.AES.decrypt(encrypted, key, { mode: CryptoJS.mode.ECB, padding: CryptoJS.pad.Pkcs7 }).toString(CryptoJS.enc.Utf8);
-const db = JSON.parse(decrypted);
-if (!db.bannedIps) db.bannedIps = [];
-if (!db.verifyAttempts) db.verifyAttempts = {};
-return db;
-} catch { return { users: [], projects: [], files: [], captchas: [], appData: [], bannedIps: [], verifyAttempts: {} }; }
+  if (!fs.existsSync(DB_FILE)) return emptyDB();
+
+  try {
+    const encrypted = fs.readFileSync(DB_FILE, 'utf8');
+
+    const decrypted = CryptoJS.AES.decrypt(encrypted, key, {
+      mode: CryptoJS.mode.ECB,
+      padding: CryptoJS.pad.Pkcs7
+    }).toString(CryptoJS.enc.Utf8);
+
+    const db = JSON.parse(decrypted);
+    const defaults = emptyDB();
+
+    for (const field of Object.keys(defaults)) {
+      if (db[field] === undefined) {
+        db[field] = defaults[field];
+      }
+    }
+
+    return db;
+  } catch (e) {
+    console.error('DB okunamadı:', e.message);
+    throw new Error(
+      'Veritabanı okunamadı. ENCRYPTION_KEY değerinin eski kurulumla aynı olduğundan emin olun.'
+    );
+  }
 }
 
 function saveDB(db) {
-const encrypted = CryptoJS.AES.encrypt(JSON.stringify(db), key, { mode: CryptoJS.mode.ECB, padding: CryptoJS.pad.Pkcs7 }).toString();
-fs.writeFileSync(DB_FILE, encrypted, 'utf8');
+  const encrypted = CryptoJS.AES.encrypt(
+    JSON.stringify(db),
+    key,
+    {
+      mode: CryptoJS.mode.ECB,
+      padding: CryptoJS.pad.Pkcs7
+    }
+  ).toString();
+
+  const tmp = DB_FILE + '.tmp';
+
+  fs.writeFileSync(tmp, encrypted, 'utf8');
+  fs.renameSync(tmp, DB_FILE);
 }
 
-// ---------- IP BAN KONTROLÜ (GÜVENLİK DUVARI GÜNCELLENDİ) ----------
+function randomString(bytes = 32) {
+  return CryptoJS.lib.WordArray.random(bytes).toString();
+}
+
+function validEmail(email) {
+  return typeof email === 'string' &&
+    /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email) &&
+    email.length <= 254;
+}
+
+function safeUser(user) {
+  return {
+    id: user.id,
+    username: user.username,
+    email: user.email || null,
+    createdAt: user.createdAt
+  };
+}
+
+app.use(express.json({ limit: '2mb' }));
+app.use(express.urlencoded({ extended: true, limit: '2mb' }));
+
 function checkBan(req, res, next) {
-const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-const db = loadDB();
-if (db.bannedIps.includes(clientIp)) {
-return res.status(403).send(`
-<!DOCTYPE html>
-<html lang="tr">
-<head>
-    <meta charset="UTF-8">
-    <title>Vantorium Base | Ban</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-</head>
-<body class="bg-slate-900 text-white flex items-center justify-center h-screen">
-    <div class="text-center p-8 bg-slate-800 border border-slate-700 rounded-2xl shadow-xl max-w-md">
-        <div class="text-red-500 text-5xl mb-4">🚫</div>
-        <h1 class="text-2xl font-bold mb-2">IP Adresiniz Banlandı!</h1>
-        <p class="text-slate-400 text-sm">Güvenlik duvarı kurallarını ihlal ettiğiniz için erişiminiz engellendi.</p>
-    </div>
-</body>
-</html>
-`);
-}
-req.clientIp = clientIp;
-next();
-} 
+  const db = loadDB();
 
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+  if (db.bannedIps.includes(req.ip)) {
+    return res.status(403).json({
+      error: 'IP adresiniz engellenmiş.'
+    });
+  }
+
+  req.clientIp = req.ip;
+  next();
+}
+
 app.use(checkBan);
 
-const limiter = rateLimit({
-windowMs: 15 * 60 * 1000,
-max: 200,
-handler: (req, res) => {
-const db = loadDB();
-if (!db.bannedIps.includes(req.clientIp)) { db.bannedIps.push(req.clientIp); saveDB(db); }
-res.status(429).send(`
-<!DOCTYPE html>
-<html lang="tr">
-<head>
-    <meta charset="UTF-8">
-    <title>Vantorium Base | Rate Limit</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-</head>
-<body class="bg-slate-900 text-white flex items-center justify-center h-screen">
-    <div class="text-center p-8 bg-slate-800 border border-slate-700 rounded-2xl shadow-xl max-w-md">
-        <div class="text-amber-500 text-5xl mb-4">⚠️</div>
-        <h1 class="text-2xl font-bold mb-2">Çok Fazla İstek!</h1>
-        <p class="text-slate-400 text-sm">Çok fazla istek attığınız için IP adresiniz banlandı.</p>
-    </div>
-</body>
-</html>
-`);
+app.use('/api', rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 300,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  handler: (req, res) => res.status(429).json({
+    error: 'Çok fazla istek. Biraz bekleyin.'
+  })
+}));
+
+function requireHuman(req, res, next) {
+  const token = req.headers['x-verification-token'];
+
+  if (!token) {
+    return res.status(403).json({
+      error: 'Önce insan doğrulamasını tamamlayın.',
+      verificationRequired: true
+    });
+  }
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+
+    if (decoded.purpose !== 'human-verification') {
+      throw new Error('invalid purpose');
+    }
+
+    next();
+  } catch {
+    return res.status(403).json({
+      error: 'Doğrulama geçersiz veya süresi dolmuş.',
+      verificationRequired: true
+    });
+  }
 }
+
+app.use('/api', (req, res, next) => {
+  const publicRoutes = [
+    '/generate-captcha',
+    '/captcha',
+    '/verify-human',
+    '/verify-status'
+  ];
+
+  if (
+    publicRoutes.includes(req.path) ||
+    req.path.startsWith('/app/')
+  ) {
+    return next();
+  }
+
+  requireHuman(req, res, next);
 });
-app.use('/api', limiter); 
-
-const upload = multer({ dest: UPLOAD_DIR, limits: { fileSize: 50 * 1024 * 1024 } });
-
-function randomString(length = 32) { return CryptoJS.lib.WordArray.random(length / 2).toString(); }
 
 function authenticateToken(req, res, next) {
-const token = req.headers['authorization']?.split(' ')[1];
-if (!token) return res.status(401).json({ error: 'Yetkisiz erişim' });
-jwt.verify(token, JWT_SECRET, (err, user) => {
-if (err) return res.status(403).json({ error: 'Oturum süren dolmuş' });
-req.user = user;
-next();
-});
+  const auth = req.headers.authorization || '';
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
+
+  if (!token) {
+    return res.status(401).json({
+      error: 'Oturum gerekli.'
+    });
+  }
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+
+    if (decoded.kind && decoded.kind !== 'dashboard') {
+      throw new Error('wrong token');
+    }
+
+    req.user = decoded;
+    next();
+  } catch {
+    res.status(401).json({
+      error: 'Oturum geçersiz veya süresi dolmuş.'
+    });
+  }
 }
 
 function authenticateApp(req, res, next) {
-const apiKey = req.headers['x-api-key'];
-if (!apiKey) return res.status(401).json({ error: 'API Key eksik' });
-const db = loadDB();
-const project = db.projects.find(p => p.apiKey === apiKey);
-if (!project) return res.status(403).json({ error: 'Geçersiz API Key' });
+  const apiKey = req.headers['x-api-key'];
 
-if (project.allowedOrigin && project.allowedOrigin !== "*") {
-const origin = req.headers.origin || req.headers.referer || "";
-if (!origin.includes(project.allowedOrigin)) {
-return res.status(403).json({ error: 'Klonlama Koruması: Farklı adresten çağrılıyor.' });
+  if (!apiKey) {
+    return res.status(401).json({
+      error: 'x-api-key başlığı eksik.'
+    });
+  }
+
+  const db = loadDB();
+  const project = db.projects.find(p => p.apiKey === apiKey);
+
+  if (!project) {
+    return res.status(403).json({
+      error: 'Geçersiz API Key.'
+    });
+  }
+
+  if (project.allowedOrigin && project.allowedOrigin !== '*') {
+    const origin = req.headers.origin;
+
+    if (origin) {
+      try {
+        const hostname = new URL(origin).hostname.toLowerCase();
+
+        const allowed = new URL(
+          project.allowedOrigin.includes('://')
+            ? project.allowedOrigin
+            : 'https://' + project.allowedOrigin
+        ).hostname.toLowerCase();
+
+        if (hostname !== allowed) {
+          return res.status(403).json({
+            error: 'Bu domain için izin yok.'
+          });
+        }
+      } catch {
+        return res.status(403).json({
+          error: 'Geçersiz Origin.'
+        });
+      }
+    }
+  }
+
+  project.apiCalls = (project.apiCalls || 0) + 1;
+  saveDB(db);
+
+  req.project = project;
+  next();
 }
+
+function authenticateAppUser(req, res, next) {
+  const auth = req.headers.authorization || '';
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
+
+  if (!token) {
+    return res.status(401).json({
+      error: 'Uygulama kullanıcı oturumu gerekli.'
+    });
+  }
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+
+    if (
+      decoded.kind !== 'app-user' ||
+      decoded.projectId !== req.project.id
+    ) {
+      throw new Error('wrong project');
+    }
+
+    req.appUser = decoded;
+    next();
+  } catch {
+    res.status(401).json({
+      error: 'Uygulama oturumu geçersiz veya süresi dolmuş.'
+    });
+  }
 }
 
-project.apiCalls = (project.apiCalls || 0) + 1;
-saveDB(db);
-
-req.project = project;
-next();
-}
-
-// ==========================================
-// API ROTALARI
-// ==========================================
-
-app.get('/ping', (req, res) => res.send('pong'));
-
-app.post('/api/verify-human', (req, res) => {
-const { interactionTime, mouseMoved, captchaId, captchaAnswer } = req.body;
-const db = loadDB();
-const clientIp = req.clientIp;
-
-if (interactionTime < 800 || mouseMoved === false) {
-if (!db.bannedIps.includes(clientIp)) { db.bannedIps.push(clientIp); saveDB(db); }
-return res.status(403).json({ error: 'Bot tespit edildi! IP adresiniz kalıcı olarak banlandı.' });
-}
-
-const captcha = db.captchas[captchaId];
-if (!captcha || captcha.answer !== parseInt(captchaAnswer)) {
-db.verifyAttempts[clientIp] = (db.verifyAttempts[clientIp] || 0) + 1;
-const remaining = 2 - db.verifyAttempts[clientIp];
-
-if (remaining <= 0) { if (!db.bannedIps.includes(clientIp)) { db.bannedIps.push(clientIp); saveDB(db); } return res.status(403).json({ error: '2 kez yanlış yaptınız! IP adresiniz kalıcı olarak banlandı.' }); } saveDB(db); return res.status(400).json({ error: `Captcha yanlış! Kalan hakkınız: ${remaining}`, remainingAttempts: remaining }); 
-
-}
-
-delete db.captchas[captchaId];
-if (db.verifyAttempts[clientIp]) delete db.verifyAttempts[clientIp];
-saveDB(db);
-res.json({ success: true, verified: true });
+app.get('/ping', (req, res) => {
+  res.json({
+    success: true,
+    service: 'Vantorium Base',
+    status: 'online',
+    timestamp: Date.now()
+  });
 });
 
+function createCaptcha(db) {
+  const a = Math.floor(Math.random() * 10) + 1;
+  const b = Math.floor(Math.random() * 10) + 1;
+  const id = randomString(16);
+
+  db.captchas[id] = {
+    answer: a + b,
+    createdAt: Date.now()
+  };
+
+  for (const k of Object.keys(db.captchas)) {
+    if (Date.now() - db.captchas[k].createdAt > 600000) {
+      delete db.captchas[k];
+    }
+  }
+
+  return {
+    captchaId: id,
+    soru: `${a} + ${b} = ?`
+  };
+}
+
 app.get('/api/generate-captcha', (req, res) => {
-const db = loadDB();
-const a = Math.floor(Math.random() * 10) + 1;
-const b = Math.floor(Math.random() * 10) + 1;
-const captchaId = randomString(16);
-db.captchas[captchaId] = { answer: a + b, createdAt: Date.now() };
-for (const id in db.captchas) { if (Date.now() - db.captchas[id].createdAt > 600000) delete db.captchas[id]; }
-saveDB(db);
-res.json({ captchaId, soru: `${a} + ${b}` });
+  const db = loadDB();
+  const captcha = createCaptcha(db);
+  saveDB(db);
+  res.json(captcha);
 });
 
 app.get('/api/captcha', (req, res) => {
-const db = loadDB();
-const a = Math.floor(Math.random() * 10) + 1;
-const b = Math.floor(Math.random() * 10) + 1;
-const captchaId = randomString(16);
-db.captchas[captchaId] = { answer: a + b, createdAt: Date.now() };
-saveDB(db);
-res.json({ captchaId, soru: `${a} + ${b} = ?` });
+  const db = loadDB();
+  const captcha = createCaptcha(db);
+  saveDB(db);
+  res.json(captcha);
 });
 
+app.post('/api/verify-human', (req, res) => {
+  const { captchaId, captchaAnswer } = req.body || {};
+
+  const db = loadDB();
+  const captcha = db.captchas[captchaId];
+
+  if (!captcha || Date.now() - captcha.createdAt > 600000) {
+    delete db.captchas[captchaId];
+    saveDB(db);
+
+    return res.status(400).json({
+      error: 'CAPTCHA bulunamadı veya süresi doldu. Yenileyin.'
+    });
+  }
+
+  if (captcha.answer !== Number(captchaAnswer)) {
+    const attempts = (db.verifyAttempts[req.clientIp] || 0) + 1;
+    db.verifyAttempts[req.clientIp] = attempts;
+    saveDB(db);
+
+    return res.status(400).json({
+      error: 'CAPTCHA cevabı yanlış.',
+      remainingAttempts: Math.max(0, 5 - attempts)
+    });
+  }
+
+  delete db.captchas[captchaId];
+  delete db.verifyAttempts[req.clientIp];
+  saveDB(db);
+
+  const verificationToken = jwt.sign(
+    { purpose: 'human-verification' },
+    JWT_SECRET,
+    { expiresIn: '12h' }
+  );
+
+  res.json({
+    success: true,
+    verified: true,
+    verificationToken,
+    expiresIn: 43200
+  });
+});
+
+app.get('/api/verify-status', (req, res) => {
+  try {
+    const decoded = jwt.verify(
+      req.headers['x-verification-token'] || '',
+      JWT_SECRET
+    );
+
+    res.json({
+      verified: decoded.purpose === 'human-verification'
+    });
+  } catch {
+    res.json({ verified: false });
+  }
+});
+
+// PANEL KAYIT
 app.post('/api/register', async (req, res) => {
-try {
-const { username, password, captchaId, captchaAnswer } = req.body;
-const db = loadDB();
-const captcha = db.captchas[captchaId];
-if (!captcha || captcha.answer !== parseInt(captchaAnswer)) return res.status(400).json({ error: 'Captcha yanlış' });
-if (db.users.find(u => u.username === username)) return res.status(400).json({ error: 'Kullanıcı adı zaten var' });
-const hashed = await bcrypt.hash(password, 10);
-const user = { id: randomString(16), username, password: hashed, createdAt: Date.now() };
-db.users.push(user);
-delete db.captchas[captchaId];
-saveDB(db);
-const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: '7d' });
-res.json({ token, user: { id: user.id, username: user.username } });
-} catch { res.status(500).json({ error: 'Sunucu hatası' }); }
+  try {
+    const {
+      username,
+      email,
+      password,
+      captchaId,
+      captchaAnswer
+    } = req.body || {};
+
+    if (
+      typeof username !== 'string' ||
+      username.trim().length < 3 ||
+      username.trim().length > 24 ||
+      !validEmail(email) ||
+      typeof password !== 'string' ||
+      password.length < 8 ||
+      password.length > 128
+    ) {
+      return res.status(400).json({
+        error: 'Kullanıcı adı 3-24, geçerli e-posta ve 8-128 karakterlik şifre gereklidir.'
+      });
+    }
+
+    const db = loadDB();
+    const captcha = db.captchas[captchaId];
+
+    if (
+      !captcha ||
+      Date.now() - captcha.createdAt > 600000 ||
+      captcha.answer !== Number(captchaAnswer)
+    ) {
+      return res.status(400).json({
+        error: 'Kayıt CAPTCHA bilgileri hatalı.'
+      });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+    const normalizedName = username.trim();
+
+    if (db.users.some(
+      u => u.username.toLowerCase() === normalizedName.toLowerCase()
+    )) {
+      return res.status(409).json({
+        error: 'Kullanıcı adı zaten kullanılıyor.'
+      });
+    }
+
+    if (db.users.some(
+      u => (u.email || '').toLowerCase() === normalizedEmail
+    )) {
+      return res.status(409).json({
+        error: 'Bu e-posta zaten kayıtlı.'
+      });
+    }
+
+    const user = {
+      id: randomString(16),
+      username: normalizedName,
+      email: normalizedEmail,
+      password: await bcrypt.hash(password, 12),
+      createdAt: Date.now()
+    };
+
+    db.users.push(user);
+    delete db.captchas[captchaId];
+    saveDB(db);
+
+    const token = jwt.sign(
+      {
+        kind: 'dashboard',
+        id: user.id,
+        username: user.username
+      },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    res.json({
+      success: true,
+      token,
+      user: safeUser(user)
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({
+      error: 'Kayıt sırasında sunucu hatası.'
+    });
+  }
 });
 
+// PANEL GİRİŞ
 app.post('/api/login', async (req, res) => {
-try {
-const { username, password } = req.body;
-const db = loadDB();
-const user = db.users.find(u => u.username === username);
-if (!user || !(await bcrypt.compare(password, user.password))) return res.status(401).json({ error: 'Geçersiz bilgiler' });
-const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: '7d' });
-res.json({ token, user: { id: user.id, username: user.username } });
-} catch { res.status(500).json({ error: 'Sunucu hatası' }); }
+  try {
+    const {
+      login,
+      username,
+      email,
+      password
+    } = req.body || {};
+
+    const identity = String(
+      login || email || username || ''
+    ).trim().toLowerCase();
+
+    if (!identity || typeof password !== 'string') {
+      return res.status(400).json({
+        error: 'E-posta/kullanıcı adı ve şifre gerekli.'
+      });
+    }
+
+    const db = loadDB();
+
+    const user = db.users.find(
+      u =>
+        u.username.toLowerCase() === identity ||
+        (u.email || '').toLowerCase() === identity
+    );
+
+    if (!user || !(await bcrypt.compare(password, user.password))) {
+      return res.status(401).json({
+        error: 'E-posta/kullanıcı adı veya şifre hatalı.'
+      });
+    }
+
+    const token = jwt.sign(
+      {
+        kind: 'dashboard',
+        id: user.id,
+        username: user.username
+      },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    res.json({
+      success: true,
+      token,
+      user: safeUser(user)
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({
+      error: 'Giriş sırasında sunucu hatası.'
+    });
+  }
 });
 
+app.get('/api/me', authenticateToken, (req, res) => {
+  const user = loadDB().users.find(u => u.id === req.user.id);
+
+  if (!user) {
+    return res.status(404).json({
+      error: 'Kullanıcı bulunamadı.'
+    });
+  }
+
+  res.json({ user: safeUser(user) });
+});
+
+// PROJELER
 app.get('/api/projects', authenticateToken, (req, res) => {
-const db = loadDB();
-res.json({ projects: db.projects.filter(p => p.userId === req.user.id) });
+  const db = loadDB();
+
+  res.json({
+    projects: db.projects
+      .filter(p => p.userId === req.user.id)
+      .map(({ apiKey, ...p }) => ({ ...p, apiKey }))
+  });
 });
 
-// PROJE OLUŞTURMA: Tür oyun seçildiğinde paket adı ve oyun ismi alacak şekilde güncellendi
 app.post('/api/projects', authenticateToken, (req, res) => {
-try {
-const { name, identifier, type, gameName, packageName } = req.body;
-if (!name) return res.status(400).json({ error: 'Lütfen proje adını doldurun' });
+  try {
+    const { name, type } = req.body || {};
 
-const db = loadDB();
-let finalIdentifier = identifier;
-let finalGameName = gameName || "";
-let finalPackageName = packageName || identifier;
+    if (
+      typeof name !== 'string' ||
+      name.trim().length < 2 ||
+      name.trim().length > 60
+    ) {
+      return res.status(400).json({
+        error: 'Proje adı 2-60 karakter olmalıdır.'
+      });
+    }
 
-if (type === 'Oyun') {
-    if (!gameName || !packageName) return res.status(400).json({ error: 'Lütfen oyun ismi ve paket adını doldurun' });
-    finalIdentifier = packageName;
-    finalPackageName = packageName;
-} else {
-    if (!identifier) return res.status(400).json({ error: 'Lütfen tanımlayıcı alanı doldurun' });
-}
+    if (!['Web', 'Mobil', 'Oyun', 'API'].includes(type || 'Web')) {
+      return res.status(400).json({
+        error: 'Geçersiz proje türü.'
+      });
+    }
 
-const project = {
-id: randomString(16),
-userId: req.user.id,
-name,
-identifier: finalIdentifier,
-packageName: finalPackageName,
-gameName: finalGameName,
-type: type || 'Web',
-allowedOrigin: "*",
-apiKey: randomString(32),
-apiCalls: 0,
-createdAt: Date.now()
-};
-db.projects.push(project);
-saveDB(db);
-res.json({ project });
-} catch { res.status(500).json({ error: 'Hata' }); }
+    const db = loadDB();
+
+    const project = {
+      id: randomString(16),
+      userId: req.user.id,
+      name: name.trim(),
+      type: type || 'Web',
+      identifier: '',
+      gameName: null,
+      packageName: null,
+      allowedOrigin: '*',
+      apiKey: 'vant_' + randomString(32),
+      apiCalls: 0,
+      createdAt: Date.now()
+    };
+
+    if (project.type === 'Oyun') {
+      const { gameName, packageName } = req.body;
+
+      if (
+        typeof gameName !== 'string' ||
+        !gameName.trim() ||
+        gameName.trim().length > 80 ||
+        typeof packageName !== 'string' ||
+        !/^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z][a-zA-Z0-9_]*)+$/.test(packageName.trim())
+      ) {
+        return res.status(400).json({
+          error: 'Oyun adı ve geçerli paket adı zorunludur. Örn: com.vantorium.mygame'
+        });
+      }
+
+      project.gameName = gameName.trim();
+      project.packageName = packageName.trim();
+      project.identifier = packageName.trim();
+    } else {
+      const { identifier } = req.body;
+
+      if (
+        typeof identifier !== 'string' ||
+        !identifier.trim() ||
+        identifier.length > 255
+      ) {
+        return res.status(400).json({
+          error: 'Tanımlayıcı alanı zorunludur.'
+        });
+      }
+
+      project.identifier = identifier.trim();
+
+      if (project.type === 'Mobil') {
+        project.packageName = identifier.trim();
+      }
+    }
+
+    db.projects.push(project);
+    saveDB(db);
+
+    res.json({
+      success: true,
+      project
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({
+      error: 'Proje oluşturulamadı.'
+    });
+  }
 });
 
 app.delete('/api/projects/:id', authenticateToken, (req, res) => {
-try {
-const db = loadDB();
-const pIndex = db.projects.findIndex(p => p.id === req.params.id && p.userId === req.user.id);
-if (pIndex === -1) return res.status(403).json({ error: 'Yetkisiz veya bulunamadı' });
-db.projects.splice(pIndex, 1);
-db.appData = db.appData.filter(d => d.projectId !== req.params.id);
-saveDB(db);
-res.json({ success: true });
-} catch { res.status(500).json({ error: 'Hata' }); }
+  const db = loadDB();
+
+  const index = db.projects.findIndex(
+    p => p.id === req.params.id && p.userId === req.user.id
+  );
+
+  if (index < 0) {
+    return res.status(404).json({
+      error: 'Proje bulunamadı.'
+    });
+  }
+
+  db.projects.splice(index, 1);
+  db.appData = db.appData.filter(d => d.projectId !== req.params.id);
+  db.appUsers = db.appUsers.filter(u => u.projectId !== req.params.id);
+  db.files = db.files.filter(f => f.projectId !== req.params.id);
+
+  saveDB(db);
+  res.json({ success: true });
 });
 
 app.put('/api/projects/:id/settings', authenticateToken, (req, res) => {
-try {
-const { allowedOrigin } = req.body;
-const db = loadDB();
-const project = db.projects.find(p => p.id === req.params.id && p.userId === req.user.id);
-if (!project) return res.status(403).json({ error: 'Yetkisiz' });
-project.allowedOrigin = allowedOrigin || "*";
-saveDB(db);
-res.json({ success: true, allowedOrigin: project.allowedOrigin });
-} catch { res.status(500).json({ error: 'Hata' }); }
+  const db = loadDB();
+
+  const project = db.projects.find(
+    p => p.id === req.params.id && p.userId === req.user.id
+  );
+
+  if (!project) {
+    return res.status(404).json({
+      error: 'Proje bulunamadı.'
+    });
+  }
+
+  const origin = String(req.body.allowedOrigin || '*').trim();
+
+  if (origin !== '*') {
+    try {
+      new URL(origin.includes('://') ? origin : 'https://' + origin);
+    } catch {
+      return res.status(400).json({
+        error: 'Geçersiz domain.'
+      });
+    }
+  }
+
+  project.allowedOrigin = origin;
+  saveDB(db);
+
+  res.json({
+    success: true,
+    allowedOrigin: origin
+  });
 });
 
 app.get('/api/projects/:id/data', authenticateToken, (req, res) => {
-const db = loadDB();
-const data = db.appData.filter(d => d.projectId === req.params.id);
-res.json({ data });
+  const db = loadDB();
+
+  const project = db.projects.find(
+    p => p.id === req.params.id && p.userId === req.user.id
+  );
+
+  if (!project) {
+    return res.status(404).json({
+      error: 'Proje bulunamadı.'
+    });
+  }
+
+  res.json({
+    data: db.appData.filter(d => d.projectId === project.id)
+  });
 });
 
+// UYGULAMA KAYIT
+app.post('/api/app/auth/register', authenticateApp, async (req, res) => {
+  try {
+    const { email, password, username } = req.body || {};
+
+    if (
+      !validEmail(email) ||
+      typeof password !== 'string' ||
+      password.length < 8 ||
+      password.length > 128
+    ) {
+      return res.status(400).json({
+        error: 'Geçerli e-posta ve 8-128 karakterlik şifre gerekli.'
+      });
+    }
+
+    if (
+      username !== undefined &&
+      (
+        typeof username !== 'string' ||
+        username.trim().length < 2 ||
+        username.trim().length > 32
+      )
+    ) {
+      return res.status(400).json({
+        error: 'Kullanıcı adı 2-32 karakter olmalıdır.'
+      });
+    }
+
+    const db = loadDB();
+    const normalizedEmail = email.trim().toLowerCase();
+
+    if (
+      db.appUsers.some(
+        u => u.projectId === req.project.id && u.email === normalizedEmail
+      )
+    ) {
+      return res.status(409).json({
+        error: 'Bu e-posta bu uygulamada kayıtlı.'
+      });
+    }
+
+    const user = {
+      id: randomString(16),
+      projectId: req.project.id,
+      email: normalizedEmail,
+      username: username ? username.trim() : null,
+      password: await bcrypt.hash(password, 12),
+      createdAt: Date.now()
+    };
+
+    db.appUsers.push(user);
+    saveDB(db);
+
+    const token = jwt.sign(
+      {
+        kind: 'app-user',
+        sub: user.id,
+        projectId: req.project.id,
+        email: user.email
+      },
+      JWT_SECRET,
+      { expiresIn: '30d' }
+    );
+
+    res.status(201).json({
+      success: true,
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        username: user.username
+      }
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({
+      error: 'Uygulama kaydı başarısız.'
+    });
+  }
+});
+
+// UYGULAMA GİRİŞ
+app.post('/api/app/auth/login', authenticateApp, async (req, res) => {
+  try {
+    const { email, password } = req.body || {};
+
+    if (!validEmail(email) || typeof password !== 'string') {
+      return res.status(400).json({
+        error: 'E-posta ve şifre gerekli.'
+      });
+    }
+
+    const db = loadDB();
+    const normalizedEmail = email.trim().toLowerCase();
+
+    const user = db.appUsers.find(
+      u => u.projectId === req.project.id && u.email === normalizedEmail
+    );
+
+    if (!user || !(await bcrypt.compare(password, user.password))) {
+      return res.status(401).json({
+        error: 'E-posta veya şifre hatalı.'
+      });
+    }
+
+    const token = jwt.sign(
+      {
+        kind: 'app-user',
+        sub: user.id,
+        projectId: req.project.id,
+        email: user.email
+      },
+      JWT_SECRET,
+      { expiresIn: '30d' }
+    );
+
+    res.json({
+      success: true,
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        username: user.username
+      }
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({
+      error: 'Uygulama girişi başarısız.'
+    });
+  }
+});
+
+app.get(
+  '/api/app/auth/me',
+  authenticateApp,
+  authenticateAppUser,
+  (req, res) => {
+    const user = loadDB().appUsers.find(
+      u => u.id === req.appUser.sub && u.projectId === req.project.id
+    );
+
+    if (!user) {
+      return res.status(404).json({
+        error: 'Kullanıcı bulunamadı.'
+      });
+    }
+
+    res.json({
+      user: {
+        id: user.id,
+        email: user.email,
+        username: user.username,
+        createdAt: user.createdAt
+      }
+    });
+  }
+);
+
+// UYGULAMA VERİ KAYDETME
 app.post('/api/app/data', authenticateApp, (req, res) => {
-try {
-const { key, value } = req.body;
-const db = loadDB();
-const existingData = db.appData.find(d => d.projectId === req.project.id && d.key === key);
-if (existingData) { existingData.value = value; existingData.updatedAt = Date.now(); }
-else { db.appData.push({ projectId: req.project.id, key, value, createdAt: Date.now() }); }
-saveDB(db);
-res.json({ success: true, message: 'Veri kaydedildi' });
-} catch { res.status(500).json({ error: 'Sunucu hatası' }); }
+  try {
+    const { key: dataKey, value } = req.body || {};
+
+    if (
+      typeof dataKey !== 'string' ||
+      !dataKey.trim() ||
+      dataKey.length > 100
+    ) {
+      return res.status(400).json({
+        error: 'Geçersiz veri anahtarı.'
+      });
+    }
+
+    const serialized = JSON.stringify(value);
+
+    if (serialized === undefined || serialized.length > 100000) {
+      return res.status(413).json({
+        error: 'Veri eksik veya çok büyük.'
+      });
+    }
+
+    const db = loadDB();
+
+    const existing = db.appData.find(
+      d => d.projectId === req.project.id && d.key === dataKey
+    );
+
+    if (existing) {
+      existing.value = value;
+      existing.updatedAt = Date.now();
+    } else {
+      db.appData.push({
+        projectId: req.project.id,
+        key: dataKey,
+        value,
+        createdAt: Date.now()
+      });
+    }
+
+    saveDB(db);
+
+    res.json({
+      success: true,
+      message: 'Veri kaydedildi.'
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({
+      error: 'Veri kaydedilemedi.'
+    });
+  }
 });
 
 app.get('/api/app/data/:key', authenticateApp, (req, res) => {
-const db = loadDB();
-const data = db.appData.find(d => d.projectId === req.project.id && d.key === req.params.key);
-if (!data) return res.status(404).json({ error: 'Veri bulunamadı' });
-res.json({ key: data.key, value: data.value });
+  const data = loadDB().appData.find(
+    d => d.projectId === req.project.id && d.key === req.params.key
+  );
+
+  if (!data) {
+    return res.status(404).json({
+      error: 'Veri bulunamadı.'
+    });
+  }
+
+  res.json({
+    key: data.key,
+    value: data.value
+  });
 });
 
-setInterval(() => {
-const http = require('http');
-http.get(`http://localhost:${PORT}/ping`, () => {}).on('error', () => {});
-}, 10 * 60 * 1000);
+// DOSYA YÜKLEME
+const upload = multer({
+  dest: UPLOAD_DIR,
+  limits: {
+    fileSize: 50 * 1024 * 1024,
+    files: 1
+  }
+});
 
-// ==========================================
-// VANTORIUM BASE FRONTEND (AKILLI FORM)
-// ==========================================
-app.get('/', (req, res) => {
-const html = `
-<!DOCTYPE html>
+app.post(
+  '/api/projects/:id/files',
+  authenticateToken,
+  upload.single('file'),
+  (req, res) => {
+    if (!req.file) {
+      return res.status(400).json({
+        error: 'Dosya seçilmedi.'
+      });
+    }
+
+    const db = loadDB();
+
+    const project = db.projects.find(
+      p => p.id === req.params.id && p.userId === req.user.id
+    );
+
+    if (!project) {
+      fs.unlinkSync(req.file.path);
+
+      return res.status(404).json({
+        error: 'Proje bulunamadı.'
+      });
+    }
+
+    const file = {
+      id: randomString(12),
+      projectId: project.id,
+      originalName: path.basename(req.file.originalname),
+      storedName: req.file.filename,
+      size: req.file.size,
+      createdAt: Date.now()
+    };
+
+    db.files.push(file);
+    saveDB(db);
+
+    res.json({
+      success: true,
+      file
+    });
+  }
+);
+
+// FRONTEND
+const frontend = `<!doctype html>
 <html lang="tr">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Vantorium Base | Console</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Vantorium Base</title>
 <script src="https://cdn.tailwindcss.com"></script>
-<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<script>
-tailwind.config = {
-  theme: {
-    extend: {
-      fontFamily: { sans: ['"Plus Jakarta Sans"', 'sans-serif'] },
-      colors: { primary: '#4f46e5', secondary: '#7c3aed', dark: '#0f172a' }
-    }
-  }
-}
-</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
-body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #f8fafc; color: #0f172a; user-select: none; -webkit-user-select: none; }
-input, textarea, .select-text, pre { user-select: text !important; -webkit-user-select: text !important; }
-.glass-panel { background: rgba(255, 255, 255, 0.7); backdrop-filter: blur(16px); border: 1px solid rgba(255, 255, 255, 0.4); box-shadow: 0 4px 24px -4px rgba(0,0,0,0.06); }
-.card-hover { transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
-.card-hover:hover { transform: translateY(-3px); box-shadow: 0 20px 40px -8px rgba(79, 70, 229, 0.1); border-color: rgba(79, 70, 229, 0.2); }
-.btn-primary { background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%); color: #fff; transition: all 0.3s; box-shadow: 0 4px 12px rgba(79, 70, 229, 0.2); }
-.btn-primary:hover { transform: translateY(-1px); box-shadow: 0 8px 20px rgba(79, 70, 229, 0.3); opacity: 0.95; }
-.btn-outline { background: #fff; border: 1px solid #e2e8f0; transition: all 0.2s; }
-.btn-outline:hover { background: #f8fafc; border-color: #cbd5e1; }
-.btn-danger { background: #fef2f2; color: #ef4444; border: 1px solid #fee2e2; transition: all 0.2s; }
-.btn-danger:hover { background: #ef4444; color: #fff; }
-.input-field { background: #fff; border: 1px solid #e2e8f0; transition: all 0.2s; }
-.input-field:focus { outline: none; border-color: #6366f1; box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.1); }
-.toast { animation: slideInRight 0.4s cubic-bezier(0.4, 0, 0.2, 1) forwards; }
-@keyframes slideInRight { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
-.fade-in { animation: fadeIn 0.5s ease-out forwards; }
-@keyframes fadeIn { from { opacity: 0; transform: translateY(15px); } to { opacity: 1; transform: translateY(0); } }
-.spinner { border: 2px solid rgba(79, 70, 229, 0.1); border-left-color: #4f46e5; border-radius: 50%; width: 20px; height: 20px; animation: spin 0.8s linear infinite; }
-@keyframes spin { to { transform: rotate(360deg); } }
-.glow { position: absolute; width: 300px; height: 300px; background: radial-gradient(circle, rgba(124,58,237,0.15) 0%, rgba(255,255,255,0) 70%); border-radius: 50%; z-index: -1; }
+:root{font-family:Inter,ui-sans-serif,system-ui;background:#f6f7fb;color:#171923}
+*{box-sizing:border-box}
+body{font-family:Inter,ui-sans-serif,system-ui}
+.card{background:#fff;border:1px solid #e9eaf0;border-radius:18px;box-shadow:0 4px 18px rgba(20,25,45,.035)}
+.field{width:100%;padding:12px 14px;border:1px solid #e4e6ed;border-radius:11px;background:#fff;outline:none;font:inherit;font-size:14px;transition:.2s}
+.field:focus{border-color:#7567ed;box-shadow:0 0 0 3px #7567ed18}
+.btn{background:#6254df;color:#fff;padding:11px 16px;border-radius:11px;font-size:13px;font-weight:650;transition:.18s}
+.btn:hover{background:#5143ce;transform:translateY(-1px)}
+.btn-soft{background:#f0efff;color:#5547d0}
+.btn-soft:hover{background:#e6e3ff}
+.muted{color:#85899a}
+.hidden{display:none!important}
+.sidebar{width:246px;background:#fff;border-right:1px solid #ececf1;min-height:100vh}
+.navitem{display:flex;align-items:center;gap:12px;padding:11px 13px;border-radius:10px;color:#737789;font-size:13px;font-weight:600}
+.navitem.active{background:#f0efff;color:#584bd2}
+.stat{background:linear-gradient(145deg,#fff,#fbfbff)}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+@media(max-width:760px){.sidebar{display:none}.main{padding:18px!important}.topbar{padding:16px!important}}
 </style>
 </head>
-<body class="antialiased overflow-hidden text-[15px] relative w-full h-screen">
-<div class="glow top-0 left-0"></div>
-<div class="glow bottom-0 right-0"></div>
-<div id="toastContainer" class="fixed top-4 right-4 left-4 md:left-auto z-[100] flex flex-col items-end gap-2 pointer-events-none"></div>
+<body>
 
-<!-- DOĞRULAMA EKRANI -->
-<div id="verifyScreen" class="fixed inset-0 bg-white/90 backdrop-blur-md z-50 flex items-center justify-center transition-all duration-700 p-4">
-<div class="w-full max-w-[420px] fade-in">
-<div class="flex flex-col items-center mb-10">
-<div class="w-14 h-14 bg-gradient-to-br from-indigo-600 to-purple-600 rounded-2xl flex items-center justify-center text-white font-bold text-2xl shadow-xl shadow-indigo-500/30 mb-4">V</div>
-<h1 class="text-3xl font-bold tracking-tight text-gray-900">Vantorium Base</h1>
-<p class="text-sm text-gray-500 mt-2">Güvenlik Duvarı</p>
-</div>
-<div id="humanBox" class="bg-white p-5 rounded-2xl border border-gray-100 shadow-[0_8px_30px_rgb(0,0,0,0.04)] flex items-center justify-between cursor-pointer card-hover" onclick="startVerifyFlow()">
-<div class="flex items-center gap-4">
-<div class="w-7 h-7 border-2 border-gray-300 rounded-lg flex items-center justify-center bg-white transition-colors" id="checkBox">
-<div id="checkSpinner" class="hidden spinner"></div>
-<svg class="w-5 h-5 text-white hidden" id="checkIcon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"></path></svg>
-</div>
-<span class="text-gray-800 font-semibold text-sm">İnsan olduğumu onayla</span>
-</div>
-<svg class="w-7 h-7 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>
-</div>
-<div id="serverWakeup" class="hidden mt-4 p-3 bg-amber-50 border border-amber-100 rounded-xl text-center">
-<p class="text-xs text-amber-700 font-medium animate-pulse">Sunucu uyanıyor, lütfen bekleyin...</p>
-</div>
-<div id="captchaModal" class="hidden bg-white p-5 rounded-2xl border border-gray-100 shadow-lg mt-4 fade-in">
-<div class="flex justify-between items-center mb-4">
-<p class="text-sm text-gray-600 font-medium">İşlemi tamamlayın:</p>
-<span id="attemptsDisplay" class="text-xs font-bold px-2.5 py-1 bg-red-50 text-red-600 rounded-lg border border-red-100">Kalan Hak: 2</span>
-</div>
-<div class="flex items-center gap-3 mb-5">
-<div class="bg-indigo-50 border border-indigo-100 px-4 py-2.5 rounded-xl font-mono text-lg font-bold text-indigo-700" id="captchaQuestion">-</div>
-<span class="text-gray-400 font-bold">=</span>
-<input type="number" id="captchaInput" class="flex-1 input-field px-4 py-2.5 rounded-xl text-lg font-bold text-center" placeholder="?">
-</div>
-<button id="captchaBtn" onclick="submitCaptcha()" class="w-full btn-primary font-bold py-3 rounded-xl">Doğrula</button>
-</div>
-</div>
-</div>
+<div id="toast" class="fixed top-4 right-4 z-[100]"></div>
 
-<!-- GİRİŞ EKRANI -->
-<div id="authView" class="hidden w-full h-screen flex items-center justify-center p-4 relative z-10">
-<div class="w-full max-w-[400px] glass-panel p-6 md:p-8 rounded-3xl fade-in">
-<div class="flex justify-center mb-6">
-<div class="w-14 h-14 bg-gradient-to-br from-indigo-600 to-purple-600 rounded-2xl flex items-center justify-center text-white font-bold text-2xl shadow-lg shadow-indigo-500/30">V</div>
+<section id="verifyScreen" class="fixed inset-0 z-50 bg-[#f6f7fb] flex items-center justify-center p-5">
+<div class="card w-full max-w-md p-8 text-center">
+<div class="mx-auto mb-5 grid h-12 w-12 place-items-center rounded-2xl bg-[#6254df] text-white text-xl font-extrabold">V</div>
+<h1 class="text-2xl font-extrabold tracking-tight">Vantorium Base</h1>
+<p class="muted mt-2 text-sm">Devam etmek için güvenlik kontrolünü tamamlayın.</p>
+<button class="btn w-full mt-7" onclick="startVerify()">Doğrulamayı başlat</button>
+<div id="captchaBox" class="hidden mt-5">
+<p id="question" class="font-bold mb-3"></p>
+<input id="answer" type="number" class="field mb-3" placeholder="Cevap">
+<button class="btn w-full" onclick="submitVerify()">Onayla</button>
 </div>
-<h1 class="text-2xl font-bold text-center mb-8 text-gray-900 tracking-tight">Vantorium Base</h1>
+</div>
+</section>
+
+<section id="auth" class="hidden min-h-screen flex items-center justify-center p-5">
+<div class="card w-full max-w-[430px] p-8">
+<div class="flex items-center gap-3 mb-7">
+<div class="grid h-10 w-10 place-items-center rounded-xl bg-[#6254df] text-white font-bold">V</div>
+<div><b class="text-lg">Vantorium Base</b><p class="muted text-xs">Developer workspace</p></div>
+</div>
+<h1 class="text-2xl font-bold tracking-tight mb-1" id="authTitle">Tekrar hoş geldin</h1>
+<p class="muted text-sm mb-6" id="authDesc">Hesabına giriş yap ve projelerini yönet.</p>
+
 <div id="loginForm">
-<div class="space-y-4 mb-6">
-<input type="text" id="logUser" placeholder="Kullanıcı Adı" class="w-full input-field p-3.5 rounded-xl text-sm font-medium">
-<input type="password" id="logPass" placeholder="Şifre" class="w-full input-field p-3.5 rounded-xl text-sm font-medium">
-</div>
-<button onclick="login()" class="w-full btn-primary font-bold p-3.5 rounded-xl text-sm">Giriş Yap</button>
-<p class="text-center text-sm text-gray-500 mt-6 font-medium">Hesabın yok mu? <a href="#" onclick="toggleAuth()" class="text-indigo-600 font-bold hover:underline">Kayıt Ol</a></p>
-</div>
-<div id="registerForm" class="hidden">
-<div class="space-y-4 mb-6">
-<input type="text" id="regUser" placeholder="Kullanıcı Adı" class="w-full input-field p-3.5 rounded-xl text-sm font-medium">
-<input type="password" id="regPass" placeholder="Şifre" class="w-full input-field p-3.5 rounded-xl text-sm font-medium">
-<div class="flex gap-2">
-<input type="number" id="regCaptchaInput" placeholder="Cevap" class="flex-1 input-field p-3.5 rounded-xl text-sm font-medium">
-<div class="bg-gray-50 border border-gray-200 p-3.5 rounded-xl font-mono text-sm font-bold flex items-center justify-center min-w-[90px]" id="captchaQuestion2">-</div>
-<button onclick="loadCaptcha()" class="bg-white border border-gray-200 hover:bg-gray-50 px-4 rounded-xl text-gray-700 transition">↻</button>
-</div>
-</div>
-<button onclick="register()" class="w-full btn-primary font-bold p-3.5 rounded-xl text-sm">Hesap Oluştur</button>
-<p class="text-center text-sm text-gray-500 mt-6 font-medium">Zaten üye misin? <a href="#" onclick="toggleAuth()" class="text-indigo-600 font-bold hover:underline">Giriş Yap</a></p>
-</div>
-</div>
+<label class="text-xs font-semibold">E-posta veya kullanıcı adı</label>
+<input id="loginIdentity" class="field mt-2 mb-4" placeholder="ornek@mail.com">
+<label class="text-xs font-semibold">Şifre</label>
+<input id="loginPass" type="password" class="field mt-2 mb-5" placeholder="Şifren">
+<button class="btn w-full" onclick="login()">Giriş yap</button>
+<p class="text-center text-sm muted mt-5">Hesabın yok mu? <button class="font-semibold text-[#6254df]" onclick="toggleAuth()">Kayıt ol</button></p>
 </div>
 
-<!-- DASHBOARD -->
-<div id="dashboardView" class="hidden w-full h-screen flex flex-col md:flex-row fade-in relative z-10">
-<!-- Mobil Üst Bar -->
-<div class="md:hidden flex items-center justify-between p-4 bg-white border-b border-gray-200 z-20 w-full shrink-0">
-<div class="flex items-center gap-2">
-<div class="w-8 h-8 bg-gradient-to-br from-indigo-600 to-purple-600 rounded-lg flex items-center justify-center text-white font-bold text-sm shadow-md">V</div>
-<span class="font-bold text-gray-900 text-base">Vantorium</span>
+<div id="registerForm" class="hidden">
+<label class="text-xs font-semibold">Kullanıcı adı</label>
+<input id="regUser" class="field mt-2 mb-3" placeholder="kullaniciadi">
+<label class="text-xs font-semibold">E-posta</label>
+<input id="regEmail" type="email" class="field mt-2 mb-3" placeholder="ornek@mail.com">
+<label class="text-xs font-semibold">Şifre</label>
+<input id="regPass" type="password" class="field mt-2 mb-3" placeholder="En az 8 karakter">
+<div class="flex gap-2 items-center mb-4">
+<input id="regAnswer" type="number" class="field" placeholder="CAPTCHA">
+<span id="regQuestion" class="rounded-xl bg-[#f2f1ff] px-4 py-3 text-sm font-bold whitespace-nowrap"></span>
 </div>
-<button onclick="logout()" class="p-2 text-gray-500 hover:text-red-600 bg-gray-50 rounded-lg transition">
-<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path></svg>
-</button>
+<button class="btn w-full" onclick="register()">Hesap oluştur</button>
+<p class="text-center text-sm muted mt-5">Zaten hesabın var mı? <button class="font-semibold text-[#6254df]" onclick="toggleAuth()">Giriş yap</button></p>
 </div>
-<!-- Masaüstü Yan Menü -->
-<aside class="hidden md:flex w-64 border-r border-gray-200/60 bg-white/50 backdrop-blur-xl flex-col h-full z-10 shrink-0">
-<div class="p-6 flex items-center gap-3">
-<div class="w-9 h-9 bg-gradient-to-br from-indigo-600 to-purple-600 rounded-xl flex items-center justify-center text-white font-bold text-lg shadow-md shadow-indigo-500/20">V</div>
-<span class="font-bold text-gray-900 tracking-tight text-lg">Vantorium <span class="text-indigo-600">Base</span></span>
 </div>
-<nav class="flex-1 px-4 space-y-1 mt-2">
-<a href="#" class="flex items-center gap-3 px-4 py-3 bg-indigo-50/80 text-indigo-700 rounded-xl text-sm font-bold transition">
-<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg> Projeler
-</a>
-</nav>
-<div class="p-4 border-t border-gray-200/60">
-<button onclick="logout()" class="flex items-center gap-3 w-full px-4 py-3 text-sm font-semibold text-gray-500 hover:text-red-600 hover:bg-red-50 rounded-xl transition">
-<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path></svg> Çıkış Yap
-</button>
+</section>
+
+<div id="dashboard" class="hidden min-h-screen">
+<aside class="sidebar fixed left-0 top-0 hidden md:block p-5">
+<div class="flex items-center gap-3 px-2 mb-10">
+<div class="grid h-10 w-10 place-items-center rounded-xl bg-[#6254df] text-white font-extrabold">V</div>
+<div><b>Vantorium</b><p class="muted text-[11px]">BASE PLATFORM</p></div>
+</div>
+<p class="muted text-[10px] font-bold tracking-[.16em] px-3 mb-2">WORKSPACE</p>
+<div class="navitem active">▦ <span>Genel Bakış</span></div>
+<div class="navitem">◇ <span>Projeler</span></div>
+<div class="navitem">⌘ <span>API & Entegrasyon</span></div>
+<div class="absolute bottom-5 left-5 right-5">
+<div class="rounded-xl bg-[#f7f7fb] p-3">
+<p class="text-xs font-semibold">Vantorium Base</p>
+<p class="muted text-[11px] mt-1">Developer workspace</p>
+</div>
 </div>
 </aside>
-<!-- Ana İçerik Alanı -->
-<main class="flex-1 h-full overflow-y-auto p-4 md:p-10 w-full">
-<div class="max-w-5xl mx-auto pb-10">
-<div class="mb-8 mt-2 md:mt-0">
-<h1 class="text-2xl md:text-3xl font-extrabold text-gray-900 tracking-tight">Projeler</h1>
-<p class="text-sm text-gray-500 mt-1 font-medium">Merhaba <span id="userNameDisplay" class="text-indigo-600 font-bold"></span>, sistemlerini buradan yönet.</p>
+
+<main class="main md:ml-[246px] p-8 max-w-[1500px]">
+<header class="topbar flex flex-wrap justify-between items-center gap-4 mb-8">
+<div>
+<p class="muted text-xs mb-1">WORKSPACE / OVERVIEW</p>
+<h1 class="text-2xl font-extrabold tracking-tight">Genel Bakış</h1>
+<p class="muted text-sm mt-1">Projelerini ve uygulama servislerini yönet.</p>
 </div>
-<div class="grid grid-cols-2 md:grid-cols-3 gap-3 mb-8">
-<div class="bg-white p-4 rounded-2xl border border-gray-200/60 shadow-sm flex flex-col justify-center">
-<span class="text-xs font-bold text-gray-400 uppercase tracking-wider mb-1">Toplam Proje</span>
-<span id="statProjects" class="text-2xl font-extrabold text-gray-900">0</span>
+<div class="flex items-center gap-3">
+<div class="text-right hidden sm:block">
+<p id="profileName" class="text-sm font-semibold">Kullanıcı</p>
+<p id="profileEmail" class="muted text-xs"></p>
 </div>
-<div class="bg-white p-4 rounded-2xl border border-gray-200/60 shadow-sm flex flex-col justify-center">
-<span class="text-xs font-bold text-gray-400 uppercase tracking-wider mb-1">API Çağrısı</span>
-<span id="statCalls" class="text-2xl font-extrabold text-indigo-600">0</span>
+<button class="btn btn-soft" onclick="logout()">Çıkış yap</button>
 </div>
-<div class="hidden md:flex bg-white p-4 rounded-2xl border border-gray-200/60 shadow-sm flex-col justify-center">
-<span class="text-xs font-bold text-gray-400 uppercase tracking-wider mb-1">Sistem Durumu</span>
-<span class="flex items-center gap-2 text-sm font-bold text-green-500 mt-1"><span class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span> Aktif</span>
+</header>
+
+<div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-7">
+<div class="card stat p-5">
+<p class="muted text-xs font-semibold">TOPLAM PROJE</p>
+<div id="projectCount" class="text-3xl font-extrabold mt-3">0</div>
+<p class="muted text-xs mt-2">Workspace projeleri</p>
+</div>
+<div class="card stat p-5">
+<p class="muted text-xs font-semibold">API ÇAĞRISI</p>
+<div id="callCount" class="text-3xl font-extrabold mt-3">0</div>
+<p class="muted text-xs mt-2">Toplam istek sayısı</p>
 </div>
 </div>
 
-<!-- PROJE OLUŞTURMA FORMU (AKILLI) -->
-<div class="bg-white border border-gray-200/60 p-4 rounded-2xl shadow-sm mb-8">
-<h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">Yeni Proje Ekle</h3>
-<div class="flex flex-col md:flex-row gap-3">
-<div class="flex-1 flex flex-col">
-<label class="text-[10px] md:text-xs font-bold text-gray-600 mb-1 ml-1">PROJE ADI</label>
-<input type="text" id="projName" placeholder="Örn: Süper Proje" class="w-full input-field p-3 rounded-xl text-sm bg-gray-50 hover:bg-white focus:bg-white transition">
+<div class="card p-6 mb-8">
+<div class="flex justify-between items-start mb-5">
+<div>
+<h2 class="font-bold text-lg">Yeni proje oluştur</h2>
+<p class="muted text-sm mt-1">Uygulaman için ayrı bir API alanı oluştur.</p>
 </div>
-<div id="dynamicFieldsContainer" class="flex-[2] flex gap-3">
-<div class="flex-1 flex flex-col">
-<label id="identifierLabel" class="text-[10px] md:text-xs font-bold text-gray-600 mb-1 ml-1">DOMAIN / URL</label>
-<input type="text" id="projIdentifier" placeholder="https://siteadresin.com" class="w-full input-field p-3 rounded-xl text-sm bg-gray-50 hover:bg-white focus:bg-white transition">
+<span class="rounded-lg bg-[#f0efff] px-3 py-1.5 text-xs font-bold text-[#6254df]">NEW PROJECT</span>
 </div>
+
+<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+<div>
+<label class="text-xs font-semibold">Proje adı</label>
+<input id="projName" class="field mt-2" placeholder="Örn. Vantorium Mobile">
 </div>
-<div class="md:w-44 flex flex-col">
-<label class="text-[10px] md:text-xs font-bold text-gray-600 mb-1 ml-1">TÜR</label>
-<select id="projType" onchange="updateFormFields()" class="w-full input-field p-3 rounded-xl text-sm bg-gray-50 hover:bg-white font-medium">
-<option value="Web">🌐 Web Uygulaması</option>
-<option value="Mobil">📱 Mobil Uygulama</option>
-<option value="Oyun">🎮 Oyun</option>
-<option value="API">⚙️ Backend API</option>
+<div>
+<label class="text-xs font-semibold">Proje türü</label>
+<select id="projType" class="field mt-2" onchange="updateFields()">
+<option value="Web">Web uygulaması</option>
+<option value="Mobil">Mobil uygulama</option>
+<option value="Oyun">Oyun</option>
+<option value="API">Backend API</option>
 </select>
 </div>
-<div class="flex flex-col justify-end">
-<button onclick="createProject()" class="btn-primary font-bold px-6 py-3 rounded-xl text-sm whitespace-nowrap">Oluştur</button>
 </div>
+
+<div id="normalFields" class="mt-4">
+<label id="identifierLabel" class="text-xs font-semibold">Domain / URL</label>
+<input id="identifier" class="field mt-2" placeholder="https://example.com">
+</div>
+
+<div id="gameFields" class="hidden mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+<div>
+<label class="text-xs font-semibold">Oyun adı</label>
+<input id="gameName" class="field mt-2" placeholder="Vantorium Adventure">
+</div>
+<div>
+<label class="text-xs font-semibold">Paket adı</label>
+<input id="packageName" class="field mt-2" placeholder="com.vantorium.mygame">
 </div>
 </div>
 
-<div id="projectsList" class="grid grid-cols-1 gap-5"></div>
+<button class="btn mt-5" onclick="createProject()">＋ Proje oluştur</button>
 </div>
+
+<div class="flex items-end justify-between mb-4">
+<div>
+<h2 class="text-lg font-bold">Projelerim</h2>
+<p class="muted text-sm mt-1">Oluşturduğun tüm projeler.</p>
+</div>
+<span id="projectLabel" class="muted text-xs"></span>
+</div>
+
+<div id="projects" class="grid grid-cols-1 xl:grid-cols-2 gap-4"></div>
 </main>
 </div>
 
-<!-- VERİ İZLEYİCİ MODAL -->
-<div id="dataModal" class="fixed inset-0 z-[90] hidden items-center justify-center modal-overlay p-4">
-<div class="bg-white rounded-3xl shadow-2xl w-full max-w-2xl overflow-hidden fade-in flex flex-col max-h-[85vh]">
-<div class="p-5 md:p-6 border-b border-gray-100 flex justify-between items-center bg-gray-50/50 shrink-0">
-<div>
-<h3 class="text-lg md:text-xl font-bold text-gray-900" id="dataModalTitle">Veri İzleyici</h3>
-<p class="text-xs text-gray-500 mt-1">API üzerinden kaydedilen veriler</p>
+<div id="dataModal" class="hidden fixed inset-0 bg-black/40 z-[80] p-4 items-center justify-center">
+<div class="card p-6 w-full max-w-2xl">
+<div class="flex justify-between mb-4">
+<h2 class="font-bold text-lg">Proje verileri</h2>
+<button onclick="closeData()">✕</button>
 </div>
-<button onclick="closeDataModal()" class="p-2 bg-white rounded-lg border border-gray-200 hover:bg-gray-50 text-gray-500 transition">
-<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
-</button>
-</div>
-<div class="p-4 md:p-6 overflow-y-auto bg-gray-50 flex-1">
-<pre id="dataContent" class="text-xs md:text-sm font-mono text-indigo-700 bg-white p-4 rounded-xl border border-gray-200 whitespace-pre-wrap break-all">Yükleniyor...</pre>
-</div>
+<pre id="dataContent" class="bg-[#f6f7fb] rounded-xl p-4 overflow-auto max-h-96 text-xs mono"></pre>
 </div>
 </div>
 
 <script>
-document.addEventListener('contextmenu', e => { if (e.target.closest('.select-text') || e.target.tagName === 'INPUT' || e.target.tagName === 'PRE') return; e.preventDefault(); });
-document.addEventListener('keydown', e => { if (e.key === 'F12' || (e.ctrlKey && e.shiftKey && e.key === 'I') || (e.ctrlKey && e.key === 'u')) { e.preventDefault(); showToast("Güvenlik İhlali: Kaynak kodu inceleme engellendi!", "error"); } });
+const API = location.origin;
 
-function copyToClipboard(text) {
-navigator.clipboard.writeText(text).then(() => { showToast("API Key panoya kopyalandı!", "success"); }).catch(() => {
-const textarea = document.createElement('textarea'); textarea.value = text; document.body.appendChild(textarea); textarea.select(); document.execCommand('copy'); document.body.removeChild(textarea); showToast("API Key panoya kopyalandı!", "success");
-});
-}
-
-function updateFormFields() {
-const type = document.getElementById('projType').value;
-const container = document.getElementById('dynamicFieldsContainer');
-
-if (type === 'Oyun') {
-    container.innerHTML = \`
-        <div class="flex-1 flex flex-col">
-            <label class="text-[10px] md:text-xs font-bold text-gray-600 mb-1 ml-1">OYUN İSMİ</label>
-            <input type="text" id="projGameName" placeholder="Örn: Benim Oyunum" class="w-full input-field p-3 rounded-xl text-sm bg-gray-50 hover:bg-white focus:bg-white transition">
-        </div>
-        <div class="flex-1 flex flex-col">
-            <label class="text-[10px] md:text-xs font-bold text-gray-600 mb-1 ml-1">PAKET ADI</label>
-            <input type="text" id="projPackageName" placeholder="com.sirket.oyun" class="w-full input-field p-3 rounded-xl text-sm bg-gray-50 hover:bg-white focus:bg-white transition">
-        </div>
-    \`;
-} else {
-    let labelText = "DOMAIN / URL";
-    let placeholder = "https://siteadresin.com";
-    if (type === 'Mobil') { labelText = "PAKET ADI"; placeholder = "com.sirket.uygulama"; }
-    else if (type === 'API') { labelText = "AÇIKLAMA"; placeholder = "Örn: Skor API'si"; }
-
-    container.innerHTML = \`
-        <div class="flex-1 flex flex-col">
-            <label id="identifierLabel" class="text-[10px] md:text-xs font-bold text-gray-600 mb-1 ml-1">\${labelText}</label>
-            <input type="text" id="projIdentifier" placeholder="\${placeholder}" class="w-full input-field p-3 rounded-xl text-sm bg-gray-50 hover:bg-white focus:bg-white transition">
-        </div>
-    \`;
-}
-}
-
-const API_URL = window.location.origin;
 let token = localStorage.getItem('token');
-let verifyCaptchaId = '';
-let regCaptchaId = '';
-let pageLoadTime = Date.now();
-let mouseMoved = false;
-let isVerifying = false;
+let verificationToken = localStorage.getItem('verificationToken');
+let captchaId = '';
+let registerCaptchaId = '';
 
-document.addEventListener('mousemove', () => { mouseMoved = true; });
-document.addEventListener('touchstart', () => { mouseMoved = true; });
-
-if (localStorage.getItem('humanVerified') === 'true') {
-document.getElementById('verifyScreen').classList.add('hidden');
-if (token) { showDashboard(); } else { document.getElementById('authView').classList.remove('hidden'); }
-}
-
-async function startVerifyFlow() {
-if (isVerifying) return;
-isVerifying = true;
-document.getElementById('checkSpinner').classList.remove('hidden');
-document.getElementById('humanBox').classList.add('pointer-events-none');
-const wakeupTimer = setTimeout(() => { document.getElementById('serverWakeup').classList.remove('hidden'); }, 3000);
-try {
-const res = await fetch(API_URL + '/api/generate-captcha');
-clearTimeout(wakeupTimer);
-document.getElementById('serverWakeup').classList.add('hidden');
-if (!res.ok) throw new Error("Sunucu yanıt vermedi");
-const data = await res.json();
-verifyCaptchaId = data.captchaId;
-document.getElementById('captchaQuestion').innerText = data.soru;
-document.getElementById('checkSpinner').classList.add('hidden');
-document.getElementById('checkBox').classList.replace('border-gray-300', 'bg-indigo-600 border-indigo-600');
-document.getElementById('checkIcon').classList.remove('hidden');
-document.getElementById('captchaModal').classList.remove('hidden');
-document.getElementById('captchaInput').focus();
-} catch (error) {
-clearTimeout(wakeupTimer);
-document.getElementById('serverWakeup').classList.add('hidden');
-showToast("Sunucuya ulaşılamadı. Lütfen tekrar deneyin.", "error");
-document.getElementById('checkSpinner').classList.add('hidden');
-document.getElementById('humanBox').classList.remove('pointer-events-none');
-isVerifying = false;
-}
+function esc(v) {
+  return String(v ?? '').replace(/[&<>"']/g, c => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  }[c]));
 }
 
-async function submitCaptcha() {
-const answer = document.getElementById('captchaInput').value;
-if (!answer) return showToast("Cevabı gir!", "error");
-const btn = document.getElementById('captchaBtn');
-btn.disabled = true;
-btn.innerText = "Kontrol ediliyor...";
-const interactionTime = Date.now() - pageLoadTime;
-try {
-const res = await fetch(API_URL + '/api/verify-human', {
-method: 'POST',
-headers: {'Content-Type': 'application/json'},
-body: JSON.stringify({ interactionTime, mouseMoved, captchaId: verifyCaptchaId, captchaAnswer: answer })
-});
-const data = await res.json();
-if (res.ok) {
-localStorage.setItem('humanVerified', 'true');
-document.getElementById('verifyScreen').style.opacity = '0';
-setTimeout(() => {
-document.getElementById('verifyScreen').classList.add('hidden');
-if (token) { showDashboard(); } else { document.getElementById('authView').classList.remove('hidden'); }
-}, 500);
-} else {
-if (res.status === 403) {
-showToast(data.error, "error");
-btn.innerText = "Banlandınız!";
-setTimeout(() => window.location.reload(), 2000);
-} else {
-showToast(data.error, "error");
-document.getElementById('attemptsDisplay').innerText = 'Kalan Hak: ' + data.remainingAttempts;
-const newCaptcha = await fetch(API_URL + '/api/generate-captcha');
-const newData = await newCaptcha.json();
-verifyCaptchaId = newData.captchaId;
-document.getElementById('captchaQuestion').innerText = newData.soru;
-document.getElementById('captchaInput').value = '';
-document.getElementById('captchaInput').focus();
-btn.disabled = false;
-btn.innerText = "Doğrula";
-}
-}
-} catch (err) {
-showToast("Bağlantı hatası oluştu!", "error");
-btn.disabled = false;
-btn.innerText = "Tekrar Dene";
-}
+function toast(m) {
+  const e = document.getElementById('toast');
+  e.innerHTML =
+    '<div class="rounded-xl bg-[#202130] text-white px-4 py-3 text-sm shadow-xl">' +
+    esc(m) +
+    '</div>';
+
+  setTimeout(() => e.innerHTML = '', 3200);
 }
 
-function showToast(message, type) {
-if(!type) type = 'error';
-const container = document.getElementById('toastContainer');
-const toast = document.createElement('div');
-toast.className = 'toast bg-white p-3.5 rounded-xl shadow-lg border text-sm font-medium flex items-center gap-3 w-full md:w-auto pointer-events-auto ' + (type === 'error' ? 'border-red-100 text-red-600' : 'border-green-100 text-green-600');
-var iconSvg = type === 'error' ? '<svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>' : '<svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>';
-toast.innerHTML = iconSvg + message;
-container.appendChild(toast);
-setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.remove(), 300); }, 3500);
+async function api(url, options = {}) {
+  const headers = {
+    ...(options.headers || {}),
+    'Content-Type': 'application/json',
+    'X-Verification-Token': verificationToken || ''
+  };
+
+  const r = await fetch(API + url, {
+    ...options,
+    headers
+  });
+
+  const d = await r.json().catch(() => ({
+    error: 'Sunucu yanıtı okunamadı.'
+  }));
+
+  if (r.status === 403 && d.verificationRequired) {
+    localStorage.removeItem('verificationToken');
+    verificationToken = null;
+    document.getElementById('verifyScreen').classList.remove('hidden');
+  }
+
+  return {
+    response: r,
+    data: d
+  };
+}
+
+async function startVerify() {
+  try {
+    const r = await fetch(API + '/api/generate-captcha');
+    const d = await r.json();
+
+    if (!r.ok) throw Error(d.error);
+
+    captchaId = d.captchaId;
+    document.getElementById('question').innerText = d.soru;
+    document.getElementById('captchaBox').classList.remove('hidden');
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+async function submitVerify() {
+  const answer = document.getElementById('answer').value;
+
+  if (!answer) return toast('CAPTCHA cevabını girin.');
+
+  try {
+    const r = await fetch(API + '/api/verify-human', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        captchaId,
+        captchaAnswer: answer
+      })
+    });
+
+    const d = await r.json();
+
+    if (!r.ok) {
+      toast(d.error);
+      document.getElementById('answer').value = '';
+      return;
+    }
+
+    verificationToken = d.verificationToken;
+    localStorage.setItem('verificationToken', verificationToken);
+
+    await continueApp();
+  } catch {
+    toast('Bağlantı hatası.');
+  }
+}
+
+async function continueApp() {
+  if (!verificationToken) {
+    document.getElementById('verifyScreen').classList.remove('hidden');
+    return;
+  }
+
+  const r = await fetch(API + '/api/verify-status', {
+    headers: {
+      'X-Verification-Token': verificationToken
+    }
+  });
+
+  const d = await r.json();
+
+  if (!d.verified) {
+    localStorage.removeItem('verificationToken');
+    verificationToken = null;
+    document.getElementById('verifyScreen').classList.remove('hidden');
+    return;
+  }
+
+  document.getElementById('verifyScreen').classList.add('hidden');
+
+  if (token) {
+    const me = await api('/api/me', {
+      headers: {
+        Authorization: 'Bearer ' + token
+      }
+    });
+
+    if (me.response.ok) {
+      document.getElementById('auth').classList.add('hidden');
+      document.getElementById('dashboard').classList.remove('hidden');
+
+      document.getElementById('profileName').innerText =
+        me.data.user.username;
+
+      document.getElementById('profileEmail').innerText =
+        me.data.user.email || '';
+
+      loadProjects();
+      return;
+    }
+
+    localStorage.removeItem('token');
+    token = null;
+  }
+
+  document.getElementById('auth').classList.remove('hidden');
 }
 
 function toggleAuth() {
-document.getElementById('loginForm').classList.toggle('hidden');
-document.getElementById('registerForm').classList.toggle('hidden');
-if (!document.getElementById('registerForm').classList.contains('hidden')) loadCaptcha();
+  const reg = document
+    .getElementById('registerForm')
+    .classList.toggle('hidden');
+
+  document.getElementById('loginForm').classList.toggle('hidden');
+
+  document.getElementById('authTitle').innerText =
+    reg ? 'Hesabını oluştur' : 'Tekrar hoş geldin';
+
+  document.getElementById('authDesc').innerText =
+    reg
+      ? 'Yeni workspace hesabını oluştur.'
+      : 'Hesabına giriş yap ve projelerini yönet.';
+
+  if (reg) loadRegisterCaptcha();
 }
 
-async function loadCaptcha() {
-const res = await fetch(API_URL + '/api/captcha');
-const data = await res.json();
-regCaptchaId = data.captchaId;
-document.getElementById('captchaQuestion2').innerText = data.soru;
+async function loadRegisterCaptcha() {
+  try {
+    const r = await fetch(API + '/api/captcha');
+    const d = await r.json();
+
+    registerCaptchaId = d.captchaId;
+    document.getElementById('regQuestion').innerText = d.soru;
+  } catch {
+    toast('CAPTCHA yüklenemedi.');
+  }
 }
 
 async function register() {
-const username = document.getElementById('regUser').value;
-const password = document.getElementById('regPass').value;
-const captchaAnswer = document.getElementById('regCaptchaInput').value;
-if(!username || !password || !captchaAnswer) return showToast("Tüm alanları doldur!");
-const res = await fetch(API_URL + '/api/register', {
-method: 'POST',
-headers: {'Content-Type': 'application/json'},
-body: JSON.stringify({ username, password, captchaId: regCaptchaId, captchaAnswer })
-});
-const data = await res.json();
-if (res.ok) {
-localStorage.setItem('token', data.token);
-localStorage.setItem('username', data.user.username);
-showToast("Kayıt başarılı!", "success");
-setTimeout(() => showDashboard(), 1000);
-} else {
-showToast(data.error);
-loadCaptcha();
-}
+  const body = {
+    username: document.getElementById('regUser').value.trim(),
+    email: document.getElementById('regEmail').value.trim(),
+    password: document.getElementById('regPass').value,
+    captchaId: registerCaptchaId,
+    captchaAnswer: document.getElementById('regAnswer').value
+  };
+
+  const { response, data } = await api('/api/register', {
+    method: 'POST',
+    body: JSON.stringify(body)
+  });
+
+  if (!response.ok) {
+    toast(data.error);
+    loadRegisterCaptcha();
+    return;
+  }
+
+  saveSession(data);
 }
 
 async function login() {
-const username = document.getElementById('logUser').value;
-const password = document.getElementById('logPass').value;
-if(!username || !password) return showToast("Bilgileri gir!");
-const res = await fetch(API_URL + '/api/login', {
-method: 'POST',
-headers: {'Content-Type': 'application/json'},
-body: JSON.stringify({ username, password })
-});
-const data = await res.json();
-if (res.ok) {
-localStorage.setItem('token', data.token);
-localStorage.setItem('username', data.user.username);
-showToast("Giriş başarılı!", "success");
-setTimeout(() => showDashboard(), 1000);
-} else {
-showToast(data.error);
+  const identity =
+    document.getElementById('loginIdentity').value.trim();
+
+  const password =
+    document.getElementById('loginPass').value;
+
+  const { response, data } = await api('/api/login', {
+    method: 'POST',
+    body: JSON.stringify({
+      login: identity,
+      password
+    })
+  });
+
+  if (!response.ok) return toast(data.error);
+
+  saveSession(data);
 }
+
+function saveSession(d) {
+  token = d.token;
+  localStorage.setItem('token', token);
+
+  document.getElementById('auth').classList.add('hidden');
+  document.getElementById('dashboard').classList.remove('hidden');
+
+  document.getElementById('profileName').innerText =
+    d.user.username;
+
+  document.getElementById('profileEmail').innerText =
+    d.user.email || '';
+
+  toast('Giriş başarılı.');
+  loadProjects();
 }
 
 function logout() {
-localStorage.removeItem('token');
-localStorage.removeItem('username');
-location.reload();
+  localStorage.removeItem('token');
+  token = null;
+  location.reload();
 }
 
-function showDashboard() {
-document.getElementById('authView').classList.add('hidden');
-document.getElementById('dashboardView').classList.remove('hidden');
-document.getElementById('userNameDisplay').innerText = localStorage.getItem('username') || 'Kullanıcı';
-updateFormFields();
-loadProjects();
+function updateFields() {
+  const type = document.getElementById('projType').value;
+  const game = type === 'Oyun';
+
+  document.getElementById('normalFields')
+    .classList.toggle('hidden', game);
+
+  document.getElementById('gameFields')
+    .classList.toggle('hidden', !game);
+
+  document.getElementById('identifierLabel').innerText = ({
+    Web: 'DOMAIN / URL',
+    Mobil: 'PAKET ADI',
+    API: 'AÇIKLAMA'
+  })[type] || 'Tanımlayıcı';
+
+  document.getElementById('identifier').placeholder = ({
+    Web: 'https://example.com',
+    Mobil: 'com.company.app',
+    API: 'Skor API'
+  })[type] || '';
 }
 
 async function createProject() {
-const name = document.getElementById('projName').value;
-const type = document.getElementById('projType').value;
-let payload = { name, type };
+  const name = document.getElementById('projName').value.trim();
+  const type = document.getElementById('projType').value;
 
-if (type === 'Oyun') {
-    const gameName = document.getElementById('projGameName')?.value;
-    const packageName = document.getElementById('projPackageName')?.value;
-    if (!name || !gameName || !packageName) return showToast("Lütfen tüm alanları doldurun!");
-    payload.gameName = gameName;
-    payload.packageName = packageName;
-    payload.identifier = packageName;
-} else {
-    const identifier = document.getElementById('projIdentifier')?.value;
-    if (!name || !identifier) return showToast("Lütfen proje adı ve tanımlayıcı alanı doldurun!");
-    payload.identifier = identifier;
-}
+  const body = {
+    name,
+    type
+  };
 
-const res = await fetch(API_URL + '/api/projects', {
-method: 'POST',
-headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
-body: JSON.stringify(payload)
-});
-const data = await res.json();
-if (res.ok) {
-showToast("Proje oluşturuldu!", "success");
-document.getElementById('projName').value = '';
-if(document.getElementById('projIdentifier')) document.getElementById('projIdentifier').value = '';
-if(document.getElementById('projGameName')) document.getElementById('projGameName').value = '';
-if(document.getElementById('projPackageName')) document.getElementById('projPackageName').value = '';
-loadProjects();
-} else {
-showToast(data.error || "Hata!");
-}
-}
+  if (type === 'Oyun') {
+    body.gameName = document.getElementById('gameName').value.trim();
+    body.packageName = document.getElementById('packageName').value.trim();
+  } else {
+    body.identifier = document.getElementById('identifier').value.trim();
+  }
 
-async function deleteProject(id) {
-if(!confirm("Bu projeyi silmek istediğinize emin misiniz?")) return;
-const res = await fetch(API_URL + '/api/projects/' + id, {
-method: 'DELETE',
-headers: { 'Authorization': 'Bearer ' + token }
-});
-if(res.ok) {
-showToast("Proje silindi!", "success");
-loadProjects();
-} else {
-showToast("Silinemedi!");
-}
-}
+  if (!name) return toast('Proje adını girin.');
 
-async function saveSettings(id) {
-const origin = document.getElementById('origin-' + id).value;
-const res = await fetch(API_URL + '/api/projects/' + id + '/settings', {
-method: 'PUT',
-headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
-body: JSON.stringify({ allowedOrigin: origin })
-});
-if(res.ok) showToast("Domain kilidi güncellendi!", "success");
-}
+  const { response, data } = await api('/api/projects', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer ' + token
+    },
+    body: JSON.stringify(body)
+  });
 
-async function openDataModal(projectId, projectName) {
-document.getElementById('dataModal').classList.remove('hidden');
-document.getElementById('dataModal').classList.add('flex');
-document.getElementById('dataModalTitle').innerText = projectName;
-document.getElementById('dataContent').innerText = 'Yükleniyor...';
-const res = await fetch(API_URL + '/api/projects/' + projectId + '/data', {
-headers: { 'Authorization': 'Bearer ' + token }
-});
-const data = await res.json();
-if(data.data.length === 0) {
-document.getElementById('dataContent').innerText = '// Henüz veri yok.\\n// Uygulamanızdan API isteği attığınızda veriler burada görünecektir.';
-} else {
-document.getElementById('dataContent').innerText = JSON.stringify(data.data, null, 2);
-}
-}
+  if (!response.ok) return toast(data.error);
 
-function closeDataModal() {
-document.getElementById('dataModal').classList.add('hidden');
-document.getElementById('dataModal').classList.remove('flex');
-}
+  toast('Proje oluşturuldu.');
 
-const icons = { 'Web': '🌐', 'Mobil': '📱', 'Oyun': '🎮', 'API': '⚙️' };
-const identifierLabels = { 'Web': 'Domain', 'Mobil': 'Paket', 'Oyun': 'Oyun / Paket', 'API': 'Açıklama' };
+  ['projName', 'gameName', 'packageName', 'identifier'].forEach(id => {
+    document.getElementById(id).value = '';
+  });
+
+  loadProjects();
+}
 
 async function loadProjects() {
-const res = await fetch(API_URL + '/api/projects', {
-headers: { 'Authorization': 'Bearer ' + token }
+  const { response, data } = await api('/api/projects', {
+    headers: {
+      Authorization: 'Bearer ' + token
+    }
+  });
+
+  if (!response.ok) {
+    if (response.status === 401) logout();
+    return;
+  }
+
+  const list = document.getElementById('projects');
+  list.innerHTML = '';
+
+  document.getElementById('projectCount').innerText =
+    data.projects.length;
+
+  document.getElementById('projectLabel').innerText =
+    data.projects.length + ' proje';
+
+  document.getElementById('callCount').innerText =
+    data.projects.reduce((s, p) => s + (p.apiCalls || 0), 0);
+
+  if (!data.projects.length) {
+    list.innerHTML =
+      '<div class="card p-8 text-center muted text-sm">Henüz proje oluşturmadın.</div>';
+    return;
+  }
+
+  data.projects.forEach(p => {
+    const id = esc(p.id);
+
+    const identity = p.type === 'Oyun'
+      ? 'Oyun: ' + p.gameName + ' · Paket: ' + p.packageName
+      : 'Tanımlayıcı: ' + (p.identifier || '-');
+
+    const card = document.createElement('article');
+    card.className = 'card p-5';
+
+    card.innerHTML =
+      '<div class="flex justify-between gap-3">' +
+        '<div>' +
+          '<span class="rounded-md bg-[#f0efff] px-2 py-1 text-[10px] font-bold text-[#6254df]">' +
+            esc(p.type) +
+          '</span>' +
+          '<h3 class="font-bold text-lg mt-3">' + esc(p.name) + '</h3>' +
+          '<p class="muted text-xs mt-1">' + esc(identity) + '</p>' +
+        '</div>' +
+        '<button class="text-xs font-semibold text-red-500" data-delete="' + id + '">Sil</button>' +
+      '</div>' +
+
+      '<div class="mt-4 rounded-xl bg-[#f7f7fb] p-3">' +
+        '<p class="muted text-[10px] font-bold mb-2">PROJECT API KEY</p>' +
+        '<p class="mono text-xs break-all">' + esc(p.apiKey) + '</p>' +
+      '</div>' +
+
+      '<div class="flex flex-wrap gap-2 mt-4">' +
+        '<button class="btn btn-soft" data-copy="' + esc(p.apiKey) + '">Key kopyala</button>' +
+        '<button class="btn btn-soft" data-guide="' + id + '">Entegrasyon</button>' +
+        '<button class="btn btn-soft" data-data="' + id + '">Veriler</button>' +
+      '</div>' +
+
+      '<div id="guide-' + id + '" class="hidden mt-4 border-t pt-4">' +
+        '<label class="text-xs font-semibold">İzin verilen domain (* = tümü)</label>' +
+        '<input class="field mt-2 mb-2" id="origin-' + id + '" value="' + esc(p.allowedOrigin || '*') + '">' +
+        '<button class="btn mb-4" data-save="' + id + '">Ayarları kaydet</button>' +
+        '<p class="font-bold text-sm mb-2">Uygulama kullanıcı kayıt/giriş API</p>' +
+        '<pre class="mono whitespace-pre-wrap rounded-xl bg-[#202130] p-3 text-[11px] text-green-300">' +
+          'POST ' + API + '/api/app/auth/register\\n' +
+          'POST ' + API + '/api/app/auth/login\\n' +
+          'GET  ' + API + '/api/app/auth/me\\n\\n' +
+          'Header: x-api-key: ' + p.apiKey + '\\n' +
+          'Header (me): Authorization: Bearer APP_USER_TOKEN\\n\\n' +
+          'Register body: {email,password,username?}\\n' +
+          'Login body: {email,password}' +
+        '</pre>' +
+        '<p class="muted text-[11px] mt-2">API anahtarını herkese açık istemci kodunda kullanmak güvenlik riski taşır. Hassas işlemleri sunucu tarafında yap.</p>' +
+      '</div>';
+
+    list.appendChild(card);
+  });
+}
+
+document.addEventListener('click', async e => {
+  const t = e.target;
+
+  if (t.dataset.copy) {
+    try {
+      await navigator.clipboard.writeText(t.dataset.copy);
+      toast('API Key kopyalandı.');
+    } catch {
+      toast('Kopyalama başarısız.');
+    }
+  }
+
+  if (t.dataset.delete) {
+    if (!confirm('Projeyi ve projeye ait kullanıcı/verileri silmek istiyor musun?')) {
+      return;
+    }
+
+    const { response, data } = await api(
+      '/api/projects/' + encodeURIComponent(t.dataset.delete),
+      {
+        method: 'DELETE',
+        headers: {
+          Authorization: 'Bearer ' + token
+        }
+      }
+    );
+
+    toast(response.ok ? 'Proje silindi.' : data.error);
+    loadProjects();
+  }
+
+  if (t.dataset.guide) {
+    document.getElementById('guide-' + t.dataset.guide)
+      .classList.toggle('hidden');
+  }
+
+  if (t.dataset.save) {
+    const id = t.dataset.save;
+    const origin = document.getElementById('origin-' + id).value;
+
+    const { response, data } = await api(
+      '/api/projects/' + encodeURIComponent(id) + '/settings',
+      {
+        method: 'PUT',
+        headers: {
+          Authorization: 'Bearer ' + token
+        },
+        body: JSON.stringify({
+          allowedOrigin: origin
+        })
+      }
+    );
+
+    toast(response.ok ? 'Ayarlar kaydedildi.' : data.error);
+  }
+
+  if (t.dataset.data) {
+    openData(t.dataset.data);
+  }
 });
-if (!res.ok) { logout(); return; }
-const data = await res.json();
-const list = document.getElementById('projectsList');
-list.innerHTML = '';
-let totalCalls = 0;
-data.projects.forEach(p => totalCalls += (p.apiCalls || 0));
-document.getElementById('statProjects').innerText = data.projects.length;
-document.getElementById('statCalls').innerText = totalCalls;
 
-if(data.projects.length === 0) {
-list.innerHTML = '<div class="col-span-1 text-center text-gray-400 py-12 font-medium bg-white border border-dashed border-gray-200 rounded-2xl">Henüz bir proje oluşturmadın. Yukarıdan ilk projeni oluştur!</div>';
-return;
+async function openData(id) {
+  const { response, data } = await api(
+    '/api/projects/' + encodeURIComponent(id) + '/data',
+    {
+      headers: {
+        Authorization: 'Bearer ' + token
+      }
+    }
+  );
+
+  if (!response.ok) return toast(data.error);
+
+  document.getElementById('dataContent').textContent =
+    JSON.stringify(data.data, null, 2);
+
+  document.getElementById('dataModal').classList.remove('hidden');
+  document.getElementById('dataModal').classList.add('flex');
 }
 
-data.projects.forEach(function(p) {
-var date = new Date(p.createdAt).toLocaleDateString('tr-TR');
-var identifier = p.type === 'Oyun' ? \`\${p.gameName || ''} (\${p.packageName || ''})\` : (p.identifier || p.packageName || '');
-var identifierLabel = identifierLabels[p.type] || 'Tanımlayıcı';
-
-var htmlStr = '<div class="bg-white border border-gray-200/60 p-4 md:p-6 rounded-2xl card-hover relative overflow-hidden group">';
-htmlStr += '<div class="absolute top-0 right-0 w-24 h-24 md:w-32 md:h-32 bg-indigo-50 rounded-bl-full -z-10 opacity-50 group-hover:scale-110 transition-transform"></div>';
-htmlStr += '<div class="flex flex-col md:flex-row md:items-center justify-between mb-4 gap-3">';
-htmlStr += '<div class="flex items-center gap-3">';
-htmlStr += '<div class="w-12 h-12 md:w-14 md:h-14 bg-gradient-to-br from-indigo-50 to-purple-50 border border-indigo-100 rounded-2xl flex items-center justify-center text-2xl shadow-sm shrink-0">' + (icons[p.type] || '📦') + '</div>';
-htmlStr += '<div><h4 class="text-lg md:text-xl font-bold text-gray-900 tracking-tight">' + p.name + '</h4>';
-htmlStr += '<p class="text-xs md:text-sm text-gray-500 font-medium mt-0.5"><span class="font-bold text-indigo-600">' + identifierLabel + ':</span> ' + identifier + '</p>';
-htmlStr += '<p class="text-[10px] md:text-xs text-gray-400 font-medium mt-0.5">' + p.type + ' <span class="mx-1">•</span> ' + date + '</p></div></div>';
-htmlStr += '<div class="flex items-center gap-2">';
-htmlStr += '<span class="text-[10px] md:text-xs px-2.5 py-1.5 bg-indigo-50 text-indigo-600 border border-indigo-100 rounded-lg font-bold">' + (p.apiCalls || 0) + ' Çağrı</span>';
-htmlStr += '<button onclick="deleteProject(\\'' + p.id + '\\')" class="p-2 btn-danger rounded-lg text-xs font-bold" title="Sil">';
-htmlStr += '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>';
-htmlStr += '</button></div></div>';
-htmlStr += '<div class="bg-gray-50 p-3 md:p-4 rounded-xl font-mono text-xs md:text-sm text-gray-700 break-all mb-4 border border-gray-200 flex justify-between items-center group-hover:bg-white transition-colors">';
-htmlStr += '<span class="select-text font-medium truncate mr-2">' + p.apiKey + '</span>';
-htmlStr += '<button onclick="copyToClipboard(\\'' + p.apiKey + '\\')" class="p-2 bg-white border border-gray-200 rounded-lg text-gray-400 hover:text-indigo-600 hover:border-indigo-200 hover:bg-indigo-50 transition-all shadow-sm shrink-0" title="Kopyala">';
-htmlStr += '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg></button></div>';
-htmlStr += '<div class="flex flex-col md:flex-row gap-3">';
-htmlStr += '<button onclick="openDataModal(\\'' + p.id + '\\', \\'' + p.name + '\\')" class="w-full btn-outline py-2.5 rounded-xl text-xs font-bold text-gray-700 flex items-center justify-center gap-2">';
-htmlStr += '<svg class="w-4 h-4 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4"></path></svg>';
-htmlStr += 'Verileri Gör</button>';
-htmlStr += '<button onclick="toggleGuide(\\'' + p.id + '\\')" class="w-full btn-outline py-2.5 rounded-xl text-xs font-bold text-gray-700 flex items-center justify-center gap-2">';
-htmlStr += '<svg class="w-4 h-4 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path></svg>Entegrasyon Kodu</button></div>';
-htmlStr += '<div id="guide-' + p.id + '" class="hidden mt-4 pt-4 border-t border-gray-100 space-y-4">';
-htmlStr += '<div class="border border-gray-200 p-3 rounded-xl bg-gray-50">';
-htmlStr += '<label class="text-xs font-bold text-gray-800 mb-2 block">Domain Kilidi (Klonlama Koruması)</label>';
-htmlStr += '<div class="flex gap-2">';
-htmlStr += '<input type="text" id="origin-' + p.id + '" value="' + p.allowedOrigin + '" placeholder="Örn: siteadresin.com" class="flex-1 input-field p-2 rounded-lg text-xs select-text">';
-htmlStr += '<button onclick="saveSettings(\\'' + p.id + '\\')" class="btn-outline px-3 rounded-lg text-xs font-bold text-gray-700">Kaydet</button></div></div>';
-htmlStr += '<div><span class="text-gray-800 font-bold block mb-1 text-[10px] uppercase tracking-wider">Veri Kaydet (Fetch)</span>';
-htmlStr += '<pre class="bg-[#0f172a] text-indigo-300 p-3 rounded-xl mt-1 overflow-x-auto text-[11px] select-text font-mono shadow-inner border border-gray-800">fetch("' + API_URL + '/api/app/data", {\\n method: "POST",\\n headers: { "Content-Type": "application/json", "x-api-key": "' + p.apiKey + '" },\\n body: JSON.stringify({ key: "skor", value: 1500 })\\n});</pre></div>';
-htmlStr += '</div></div>';
-list.innerHTML += htmlStr;
-});
+function closeData() {
+  document.getElementById('dataModal').classList.add('hidden');
+  document.getElementById('dataModal').classList.remove('flex');
 }
 
-function toggleGuide(id) {
-document.getElementById('guide-' + id).classList.toggle('hidden');
-}
+updateFields();
+continueApp();
 </script>
 </body>
-</html>
-`;
-res.send(html);
+</html>`;
+
+app.get('/', (req, res) => {
+  res.type('html').send(frontend);
 });
 
-app.listen(PORT, () => console.log(`Vantorium Base ${PORT} portunda hazır kral!`));
+app.use((err, req, res, next) => {
+  console.error(err);
+
+  if (err instanceof multer.MulterError) {
+    return res.status(400).json({
+      error: err.message
+    });
+  }
+
+  res.status(500).json({
+    error: 'Beklenmeyen sunucu hatası.'
+  });
+});
+
+const server = app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Vantorium Base ${PORT} portunda. DB: ${DB_FILE}`);
+});
+
+process.on('SIGTERM', () => {
+  server.close(() => process.exit(0));
+});
+
+process.on('SIGINT', () => {
+  server.close(() => process.exit(0));
+});
