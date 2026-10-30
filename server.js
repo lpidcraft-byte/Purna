@@ -220,10 +220,9 @@ app.post('/api/app/data', authenticateApp, (req, res) => {
 });
 
 // ==========================================
-// VANTORIUM BASE FRONTEND (GÜVENLİ STRING)
+// VANTORIUM BASE FRONTEND
 // ==========================================
 app.get('/', (req, res) => {
-  // HTML'i tek parça halinde gönderiyoruz. İçindeki JS'de backtick kullanmadık ki hata vermesin.
   const html = `
 <!DOCTYPE html>
 <html lang="tr">
@@ -287,7 +286,7 @@ app.get('/', (req, res) => {
             <p class="text-sm text-gray-500 mt-2">Güvenlik Duvarı</p>
         </div>
         
-        <div id="humanBox" class="bg-white p-6 rounded-2xl border border-gray-100 shadow-[0_8px_30px_rgb(0,0,0,0.04)] flex items-center justify-between cursor-pointer card-hover" onclick="startVerifyFlow()">
+        <div id="humanBox" class="bg-white p-6 rounded-2xl border border-gray-100 shadow-[0_8px_30px_rgb(0,0,0,0.04)] flex items-center justify-between cursor-pointer card-hover" onclick="startVerifyFlow(event)">
             <div class="flex items-center gap-4">
                 <div class="w-7 h-7 border-2 border-gray-300 rounded-lg flex items-center justify-center bg-white transition-colors" id="checkBox">
                     <div id="checkSpinner" class="hidden spinner"></div>
@@ -422,6 +421,7 @@ app.get('/', (req, res) => {
     let regCaptchaId = '';
     let pageLoadTime = Date.now();
     let mouseMoved = false;
+    let isVerifying = false;
 
     document.addEventListener('mousemove', () => { mouseMoved = true; });
 
@@ -430,22 +430,36 @@ app.get('/', (req, res) => {
         if (token) { showDashboard(); } else { document.getElementById('authView').classList.remove('hidden'); }
     }
 
-    async function startVerifyFlow() {
+    async function startVerifyFlow(e) {
+        if (isVerifying) return;
+        isVerifying = true;
+
         document.getElementById('checkSpinner').classList.remove('hidden');
         document.getElementById('humanBox').classList.add('pointer-events-none');
         
         setTimeout(async () => {
-            document.getElementById('checkSpinner').classList.add('hidden');
-            document.getElementById('checkBox').classList.replace('border-gray-300', 'bg-indigo-600 border-indigo-600');
-            document.getElementById('checkIcon').classList.remove('hidden');
-            
-            document.getElementById('captchaModal').classList.remove('hidden');
-            
-            const res = await fetch(API_URL + '/api/generate-captcha');
-            const data = await res.json();
-            verifyCaptchaId = data.captchaId;
-            document.getElementById('captchaQuestion').innerText = data.soru;
-            document.getElementById('captchaInput').focus();
+            try {
+                // Yapay gecikme (Cloudflare taklidi)
+                const res = await fetch(API_URL + '/api/generate-captcha');
+                if (!res.ok) throw new Error("Sunucu yanıt vermedi");
+                const data = await res.json();
+                
+                verifyCaptchaId = data.captchaId;
+                document.getElementById('captchaQuestion').innerText = data.soru;
+                
+                // Başarılıysa spinner'ı gizle ve captcha'yı aç
+                document.getElementById('checkSpinner').classList.add('hidden');
+                document.getElementById('checkBox').classList.replace('border-gray-300', 'bg-indigo-600 border-indigo-600');
+                document.getElementById('checkIcon').classList.remove('hidden');
+                document.getElementById('captchaModal').classList.remove('hidden');
+                document.getElementById('captchaInput').focus();
+            } catch (error) {
+                // HATA OLURSA (İnternet yoksa veya sunucu uyanmıyorsa) KUTUYU TEKRAR AÇ
+                showToast("Sunucuya ulaşılamadı. Lütfen tekrar deneyin.", "error");
+                document.getElementById('checkSpinner').classList.add('hidden');
+                document.getElementById('humanBox').classList.remove('pointer-events-none');
+                isVerifying = false;
+            }
         }, 1000);
     }
 
@@ -458,38 +472,45 @@ app.get('/', (req, res) => {
         btn.innerText = "Kontrol ediliyor...";
 
         const interactionTime = Date.now() - pageLoadTime;
-        const res = await fetch(API_URL + '/api/verify-human', {
-            method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ interactionTime, mouseMoved, captchaId: verifyCaptchaId, captchaAnswer: answer })
-        });
-        const data = await res.json();
+        
+        try {
+            const res = await fetch(API_URL + '/api/verify-human', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ interactionTime, mouseMoved, captchaId: verifyCaptchaId, captchaAnswer: answer })
+            });
+            const data = await res.json();
 
-        if (res.ok) {
-            localStorage.setItem('humanVerified', 'true');
-            document.getElementById('verifyScreen').style.opacity = '0';
-            setTimeout(() => {
-                document.getElementById('verifyScreen').classList.add('hidden');
-                if (token) { showDashboard(); } else { document.getElementById('authView').classList.remove('hidden'); }
-            }, 500);
-        } else {
-            if (res.status === 403) {
-                showToast(data.error, "error");
-                btn.innerText = "Banlandınız!";
-                setTimeout(() => window.location.reload(), 2000);
+            if (res.ok) {
+                localStorage.setItem('humanVerified', 'true');
+                document.getElementById('verifyScreen').style.opacity = '0';
+                setTimeout(() => {
+                    document.getElementById('verifyScreen').classList.add('hidden');
+                    if (token) { showDashboard(); } else { document.getElementById('authView').classList.remove('hidden'); }
+                }, 500);
             } else {
-                showToast(data.error, "error");
-                document.getElementById('attemptsDisplay').innerText = 'Kalan Hak: ' + data.remainingAttempts;
-                
-                const newCaptcha = await fetch(API_URL + '/api/generate-captcha');
-                const newData = await newCaptcha.json();
-                verifyCaptchaId = newData.captchaId;
-                document.getElementById('captchaQuestion').innerText = newData.soru;
-                document.getElementById('captchaInput').value = '';
-                document.getElementById('captchaInput').focus();
+                if (res.status === 403) {
+                    showToast(data.error, "error");
+                    btn.innerText = "Banlandınız!";
+                    setTimeout(() => window.location.reload(), 2000);
+                } else {
+                    showToast(data.error, "error");
+                    document.getElementById('attemptsDisplay').innerText = 'Kalan Hak: ' + data.remainingAttempts;
+                    
+                    const newCaptcha = await fetch(API_URL + '/api/generate-captcha');
+                    const newData = await newCaptcha.json();
+                    verifyCaptchaId = newData.captchaId;
+                    document.getElementById('captchaQuestion').innerText = newData.soru;
+                    document.getElementById('captchaInput').value = '';
+                    document.getElementById('captchaInput').focus();
 
-                btn.disabled = false;
-                btn.innerText = "Doğrula";
+                    btn.disabled = false;
+                    btn.innerText = "Doğrula";
+                }
             }
+        } catch (err) {
+            showToast("Bağlantı hatası oluştu!", "error");
+            btn.disabled = false;
+            btn.innerText = "Tekrar Dene";
         }
     }
 
