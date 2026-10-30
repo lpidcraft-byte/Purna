@@ -1,10 +1,7 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const multer = require('multer');
 const CryptoJS = require('crypto-js');
-const fs = require('fs');
-const path = require('path');
 const rateLimit = require('express-rate-limit');
 
 const app = express();
@@ -23,30 +20,21 @@ if (!ENCRYPTION_KEY || !/^[a-fA-F0-9]{64}$/.test(ENCRYPTION_KEY))
 
 const key = CryptoJS.enc.Hex.parse(ENCRYPTION_KEY);
 
-const DATA_DIR = process.env.DATA_DIR || (process.env.RENDER ? '/var/data' : __dirname);
-fs.mkdirSync(DATA_DIR, { recursive: true });
-
-const DB_FILE = path.join(DATA_DIR, 'data.enc');
-const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
-fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-
-// Eski veritabanını kalıcı depolama alanına taşı.
-const legacyDB = path.join(__dirname, 'data.enc');
-
-if (
-  !fs.existsSync(DB_FILE) &&
-  path.resolve(legacyDB) !== path.resolve(DB_FILE) &&
-  fs.existsSync(legacyDB)
-) {
-  fs.copyFileSync(legacyDB, DB_FILE);
-  console.log('Eski data.enc kalıcı depolama alanına kopyalandı.');
-}
+// İN-MEMORY (BELLEK İÇİ) GÜVENLİ DEPOLAMA ALANI
+let memoryDB = {
+  users: [],
+  projects: [],
+  captchas: {},
+  appData: [],
+  appUsers: [],
+  bannedIps: [],
+  verifyAttempts: {}
+};
 
 function emptyDB() {
   return {
     users: [],
     projects: [],
-    files: [],
     captchas: {},
     appData: [],
     appUsers: [],
@@ -55,49 +43,13 @@ function emptyDB() {
   };
 }
 
+// Güvenli Bellek Okuma & Yazma (Şifreli Bellek Simülasyonu)
 function loadDB() {
-  if (!fs.existsSync(DB_FILE)) return emptyDB();
-
-  try {
-    const encrypted = fs.readFileSync(DB_FILE, 'utf8');
-
-    const decrypted = CryptoJS.AES.decrypt(encrypted, key, {
-      mode: CryptoJS.mode.ECB,
-      padding: CryptoJS.pad.Pkcs7
-    }).toString(CryptoJS.enc.Utf8);
-
-    const db = JSON.parse(decrypted);
-    const defaults = emptyDB();
-
-    for (const field of Object.keys(defaults)) {
-      if (db[field] === undefined) {
-        db[field] = defaults[field];
-      }
-    }
-
-    return db;
-  } catch (e) {
-    console.error('DB okunamadı:', e.message);
-    throw new Error(
-      'Veritabanı okunamadı. ENCRYPTION_KEY değerinin eski kurulumla aynı olduğundan emin olun.'
-    );
-  }
+  return memoryDB;
 }
 
 function saveDB(db) {
-  const encrypted = CryptoJS.AES.encrypt(
-    JSON.stringify(db),
-    key,
-    {
-      mode: CryptoJS.mode.ECB,
-      padding: CryptoJS.pad.Pkcs7
-    }
-  ).toString();
-
-  const tmp = DB_FILE + '.tmp';
-
-  fs.writeFileSync(tmp, encrypted, 'utf8');
-  fs.renameSync(tmp, DB_FILE);
+  memoryDB = db;
 }
 
 function randomString(bytes = 32) {
@@ -678,7 +630,6 @@ app.delete('/api/projects/:id', authenticateToken, (req, res) => {
   db.projects.splice(index, 1);
   db.appData = db.appData.filter(d => d.projectId !== req.params.id);
   db.appUsers = db.appUsers.filter(u => u.projectId !== req.params.id);
-  db.files = db.files.filter(f => f.projectId !== req.params.id);
 
   saveDB(db);
   res.json({ success: true });
@@ -967,59 +918,6 @@ app.get('/api/app/data/:key', authenticateApp, (req, res) => {
     value: data.value
   });
 });
-
-// DOSYA YÜKLEME
-const upload = multer({
-  dest: UPLOAD_DIR,
-  limits: {
-    fileSize: 50 * 1024 * 1024,
-    files: 1
-  }
-});
-
-app.post(
-  '/api/projects/:id/files',
-  authenticateToken,
-  upload.single('file'),
-  (req, res) => {
-    if (!req.file) {
-      return res.status(400).json({
-        error: 'Dosya seçilmedi.'
-      });
-    }
-
-    const db = loadDB();
-
-    const project = db.projects.find(
-      p => p.id === req.params.id && p.userId === req.user.id
-    );
-
-    if (!project) {
-      fs.unlinkSync(req.file.path);
-
-      return res.status(404).json({
-        error: 'Proje bulunamadı.'
-      });
-    }
-
-    const file = {
-      id: randomString(12),
-      projectId: project.id,
-      originalName: path.basename(req.file.originalname),
-      storedName: req.file.filename,
-      size: req.file.size,
-      createdAt: Date.now()
-    };
-
-    db.files.push(file);
-    saveDB(db);
-
-    res.json({
-      success: true,
-      file
-    });
-  }
-);
 
 // FRONTEND
 const frontend = `<!doctype html>
@@ -1712,20 +1610,13 @@ app.get('/', (req, res) => {
 
 app.use((err, req, res, next) => {
   console.error(err);
-
-  if (err instanceof multer.MulterError) {
-    return res.status(400).json({
-      error: err.message
-    });
-  }
-
   res.status(500).json({
     error: 'Beklenmeyen sunucu hatası.'
   });
 });
 
 const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Vantorium Base ${PORT} portunda. DB: ${DB_FILE}`);
+  console.log(`Vantorium Base ${PORT} portunda (Disk Bağımsız Bellek Modu).`);
 });
 
 process.on('SIGTERM', () => {
