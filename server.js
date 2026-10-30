@@ -43,7 +43,7 @@ function checkBan(req, res, next) {
   const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
   const db = loadDB();
   if (db.bannedIps.includes(clientIp)) {
-    return res.status(403).send("<div style='font-family:sans-serif; text-align:center; margin-top:20%'><h1 style='color:#ef4444'>Vantorium Base | Erişim Engellendi</h1><p>IP adresiniz güvenlik ihlali nedeniyle kalıcı olarak banlandı.</p></div>");
+    return res.status(403).send("<h1 style='color:red; text-align:center; margin-top:20%'>Vantorium Base | IP Adresiniz Banlandı!</h1>");
   }
   req.clientIp = clientIp;
   next();
@@ -59,7 +59,7 @@ const limiter = rateLimit({
   handler: (req, res) => {
     const db = loadDB();
     if (!db.bannedIps.includes(req.clientIp)) { db.bannedIps.push(req.clientIp); saveDB(db); }
-    res.status(429).send("<div style='font-family:sans-serif; text-align:center; margin-top:20%'><h1 style='color:#ef4444'>Vantorium Base | Çok Fazla İstek</h1><p>IP adresiniz banlandı.</p></div>");
+    res.status(429).send("<h1 style='color:red; text-align:center; margin-top:20%'>Çok Fazla İstek Attınız. IP Adresiniz Banlandı!</h1>");
   }
 });
 app.use('/api', limiter);
@@ -220,10 +220,11 @@ app.post('/api/app/data', authenticateApp, (req, res) => {
 });
 
 // ==========================================
-// VANTORIUM BASE FRONTEND
+// VANTORIUM BASE FRONTEND (GÜVENLİ STRING)
 // ==========================================
 app.get('/', (req, res) => {
-  res.send(`
+  // HTML'i tek parça halinde gönderiyoruz. İçindeki JS'de backtick kullanmadık ki hata vermesin.
+  const html = `
 <!DOCTYPE html>
 <html lang="tr">
 <head>
@@ -477,7 +478,7 @@ app.get('/', (req, res) => {
                 setTimeout(() => window.location.reload(), 2000);
             } else {
                 showToast(data.error, "error");
-                document.getElementById('attemptsDisplay').innerText = `Kalan Hak: ${data.remainingAttempts}`;
+                document.getElementById('attemptsDisplay').innerText = 'Kalan Hak: ' + data.remainingAttempts;
                 
                 const newCaptcha = await fetch(API_URL + '/api/generate-captcha');
                 const newData = await newCaptcha.json();
@@ -492,11 +493,16 @@ app.get('/', (req, res) => {
         }
     }
 
-    function showToast(message, type = 'error') {
+    function showToast(message, type) {
+        if(!type) type = 'error';
         const container = document.getElementById('toastContainer');
         const toast = document.createElement('div');
         toast.className = 'toast bg-white p-4 rounded-xl shadow-lg border text-sm font-medium flex items-center gap-3 ' + (type === 'error' ? 'border-red-100 text-red-600' : 'border-green-100 text-green-600');
-        toast.innerHTML = \`<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">\${type === 'error' ? '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>' : '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>'}</svg>\` + message;
+        var iconSvg = type === 'error' 
+            ? '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>'
+            : '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>';
+        
+        toast.innerHTML = iconSvg + message;
         container.appendChild(toast);
         setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.remove(), 300); }, 3500);
     }
@@ -603,61 +609,40 @@ app.get('/', (req, res) => {
 
         const icons = { 'Web': '🌐', 'Mobil': '📱', 'Oyun': '🎮', 'API': '⚙️' };
 
-        data.projects.forEach(p => {
-            list.innerHTML += \`
-                <div class="bg-white border border-gray-200/60 p-6 rounded-2xl card-hover relative overflow-hidden group">
-                    <div class="absolute top-0 right-0 w-32 h-32 bg-indigo-50 rounded-bl-full -z-10 opacity-50 group-hover:scale-110 transition-transform"></div>
-                    <div class="flex items-center justify-between mb-5">
-                        <div class="flex items-center gap-4">
-                            <div class="w-14 h-14 bg-gradient-to-br from-indigo-50 to-purple-50 border border-indigo-100 rounded-2xl flex items-center justify-center text-2xl shadow-sm">\${icons[p.type] || '📦'}</div>
-                            <div>
-                                <h4 class="text-xl font-bold text-gray-900 tracking-tight">\${p.name}</h4>
-                                <p class="text-sm text-gray-500 font-medium mt-0.5">\${p.packageName} <span class="mx-1">•</span> \${p.type}</p>
-                            </div>
-                        </div>
-                        <span class="text-xs px-3 py-1.5 bg-green-50 text-green-700 border border-green-200 rounded-lg font-bold shadow-sm">Aktif</span>
-                    </div>
-                    
-                    <div class="bg-gray-50 p-4 rounded-xl font-mono text-sm text-gray-700 break-all mb-5 border border-gray-200 flex justify-between items-center group-hover:bg-white transition-colors">
-                        <span class="select-text font-medium">\${p.apiKey}</span>
-                        <button onclick="copyToClipboard('\${p.apiKey}')" class="ml-3 p-2.5 bg-white border border-gray-200 rounded-lg text-gray-400 hover:text-indigo-600 hover:border-indigo-200 hover:bg-indigo-50 transition-all shadow-sm" title="API Key'i Kopyala">
-                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
-                        </button>
-                    </div>
+        data.projects.forEach(function(p) {
+            var htmlStr = '<div class="bg-white border border-gray-200/60 p-6 rounded-2xl card-hover relative overflow-hidden group">';
+            htmlStr += '<div class="absolute top-0 right-0 w-32 h-32 bg-indigo-50 rounded-bl-full -z-10 opacity-50 group-hover:scale-110 transition-transform"></div>';
+            htmlStr += '<div class="flex items-center justify-between mb-5">';
+            htmlStr += '<div class="flex items-center gap-4">';
+            htmlStr += '<div class="w-14 h-14 bg-gradient-to-br from-indigo-50 to-purple-50 border border-indigo-100 rounded-2xl flex items-center justify-center text-2xl shadow-sm">' + (icons[p.type] || '📦') + '</div>';
+            htmlStr += '<div><h4 class="text-xl font-bold text-gray-900 tracking-tight">' + p.name + '</h4>';
+            htmlStr += '<p class="text-sm text-gray-500 font-medium mt-0.5">' + p.packageName + ' <span class="mx-1">•</span> ' + p.type + '</p></div></div>';
+            htmlStr += '<span class="text-xs px-3 py-1.5 bg-green-50 text-green-700 border border-green-200 rounded-lg font-bold shadow-sm">Aktif</span></div>';
+            
+            htmlStr += '<div class="bg-gray-50 p-4 rounded-xl font-mono text-sm text-gray-700 break-all mb-5 border border-gray-200 flex justify-between items-center group-hover:bg-white transition-colors">';
+            htmlStr += '<span class="select-text font-medium">' + p.apiKey + '</span>';
+            htmlStr += '<button onclick="copyToClipboard(\'' + p.apiKey + '\')" class="ml-3 p-2.5 bg-white border border-gray-200 rounded-lg text-gray-400 hover:text-indigo-600 hover:border-indigo-200 hover:bg-indigo-50 transition-all shadow-sm" title="API Key Kopyala">';
+            htmlStr += '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg></button></div>';
 
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div class="border border-gray-200 p-4 rounded-xl bg-white">
-                            <label class="text-xs font-bold text-gray-800 mb-2 block flex items-center gap-1">
-                                <svg class="w-3.5 h-3.5 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>
-                                Klonlama Koruması (Domain Kilidi)
-                            </label>
-                            <div class="flex gap-2">
-                                <input type="text" id="origin-\${p.id}" value="\${p.allowedOrigin}" placeholder="Örn: siteadresin.com" class="flex-1 input-field p-2.5 rounded-lg text-sm select-text font-medium">
-                                <button onclick="saveSettings('\${p.id}')" class="btn-outline px-4 rounded-lg text-sm font-bold text-gray-700">Kaydet</button>
-                            </div>
-                            <p class="text-[11px] text-gray-400 mt-2 font-medium">* Boş bırakırsan herkes erişebilir. Doldurursan sadece o site çalışır.</p>
-                        </div>
+            htmlStr += '<div class="grid grid-cols-1 md:grid-cols-2 gap-4">';
+            htmlStr += '<div class="border border-gray-200 p-4 rounded-xl bg-white">';
+            htmlStr += '<label class="text-xs font-bold text-gray-800 mb-2 block flex items-center gap-1">';
+            htmlStr += '<svg class="w-3.5 h-3.5 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>';
+            htmlStr += 'Klonlama Koruması (Domain Kilidi)</label>';
+            htmlStr += '<div class="flex gap-2">';
+            htmlStr += '<input type="text" id="origin-' + p.id + '" value="' + p.allowedOrigin + '" placeholder="Örn: siteadresin.com" class="flex-1 input-field p-2.5 rounded-lg text-sm select-text font-medium">';
+            htmlStr += '<button onclick="saveSettings(\'' + p.id + '\')" class="btn-outline px-4 rounded-lg text-sm font-bold text-gray-700">Kaydet</button></div>';
+            htmlStr += '<p class="text-[11px] text-gray-400 mt-2 font-medium">* Boş bırakırsan herkes erişebilir. Doldurursan sadece o site çalışır.</p></div>';
 
-                        <div class="flex items-center">
-                             <button onclick="toggleGuide('\${p.id}')" class="w-full btn-outline py-3.5 rounded-xl text-sm font-bold text-gray-700 flex items-center justify-center gap-2">
-                                <svg class="w-4 h-4 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path></svg>
-                                Entegrasyon Kodlarını Gör
-                             </button>
-                        </div>
-                    </div>
-                    
-                    <div id="guide-\${p.id}" class="hidden mt-5 pt-5 border-t border-gray-100 space-y-4 text-sm">
-                        <div>
-                            <span class="text-gray-800 font-bold block mb-2 text-xs uppercase tracking-wider">1. Veri Kaydet</span>
-                            <pre class="bg-[#0f172a] text-indigo-300 p-4 rounded-xl mt-1 overflow-x-auto text-xs select-text font-mono shadow-inner border border-gray-800">fetch("\${API_URL}/api/app/data", {
-  method: "POST",
-  headers: { "Content-Type": "application/json", "x-api-key": "\${p.apiKey}" },
-  body: JSON.stringify({ key: "skor", value: 1500 })
-});</pre>
-                        </div>
-                    </div>
-                </div>
-            \`;
+            htmlStr += '<div class="flex items-center">';
+            htmlStr += '<button onclick="toggleGuide(\'' + p.id + '\')" class="w-full btn-outline py-3.5 rounded-xl text-sm font-bold text-gray-700 flex items-center justify-center gap-2">';
+            htmlStr += '<svg class="w-4 h-4 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path></svg>Entegrasyon Kodlarını Gör</button></div></div>';
+
+            htmlStr += '<div id="guide-' + p.id + '" class="hidden mt-5 pt-5 border-t border-gray-100 space-y-4 text-sm">';
+            htmlStr += '<div><span class="text-gray-800 font-bold block mb-2 text-xs uppercase tracking-wider">1. Veri Kaydet</span>';
+            htmlStr += '<pre class="bg-[#0f172a] text-indigo-300 p-4 rounded-xl mt-1 overflow-x-auto text-xs select-text font-mono shadow-inner border border-gray-800">fetch("' + API_URL + '/api/app/data", {\n  method: "POST",\n  headers: { "Content-Type": "application/json", "x-api-key": "' + p.apiKey + '" },\n  body: JSON.stringify({ key: "skor", value: 1500 })\n});</pre></div></div></div>';
+
+            list.innerHTML += htmlStr;
         });
     }
 
@@ -667,7 +652,8 @@ app.get('/', (req, res) => {
 </script>
 </body>
 </html>
-  `);
+  `;
+  res.send(html);
 });
 
 app.listen(PORT, () => console.log(`Vantorium Base ${PORT} portunda hazır kral!`));
