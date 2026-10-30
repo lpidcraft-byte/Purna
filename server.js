@@ -53,9 +53,10 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use(checkBan);
 
+// Rate Limit (API istekleri için)
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 100,
+  max: 200, 
   handler: (req, res) => {
     const db = loadDB();
     if (!db.bannedIps.includes(req.clientIp)) { db.bannedIps.push(req.clientIp); saveDB(db); }
@@ -91,6 +92,11 @@ function authenticateApp(req, res, next) {
       return res.status(403).json({ error: 'Klonlama Koruması: Farklı adresten çağrılıyor.' });
     }
   }
+  
+  // API Çağrı Sayacını Arttır
+  project.apiCalls = (project.apiCalls || 0) + 1;
+  saveDB(db);
+
   req.project = project;
   next();
 }
@@ -98,6 +104,9 @@ function authenticateApp(req, res, next) {
 // ==========================================
 // API ROTALARI
 // ==========================================
+
+// Sunucuyu Uyanık Tutma (Render için)
+app.get('/ping', (req, res) => res.send('pong'));
 
 app.post('/api/verify-human', (req, res) => {
   const { interactionTime, mouseMoved, captchaId, captchaAnswer } = req.body;
@@ -112,11 +121,13 @@ app.post('/api/verify-human', (req, res) => {
   const captcha = db.captchas[captchaId];
   if (!captcha || captcha.answer !== parseInt(captchaAnswer)) {
     db.verifyAttempts[clientIp] = (db.verifyAttempts[clientIp] || 0) + 1;
-    const remaining = 3 - db.verifyAttempts[clientIp];
+    
+    // İSTEDİĞİN GİBİ 2 HAK SİSTEMİ
+    const remaining = 2 - db.verifyAttempts[clientIp];
     
     if (remaining <= 0) {
       if (!db.bannedIps.includes(clientIp)) { db.bannedIps.push(clientIp); saveDB(db); }
-      return res.status(403).json({ error: '3 kez yanlış yaptınız! IP adresiniz kalıcı olarak banlandı.' });
+      return res.status(403).json({ error: '2 kez yanlış yaptınız! IP adresiniz kalıcı olarak banlandı.' });
     }
     
     saveDB(db);
@@ -188,10 +199,26 @@ app.post('/api/projects', authenticateToken, (req, res) => {
     const { name, packageName, type } = req.body;
     if (!name || !packageName) return res.status(400).json({ error: 'Boş alan bırakma' });
     const db = loadDB();
-    const project = { id: randomString(16), userId: req.user.id, name, packageName, type: type || 'Web', allowedOrigin: "*", apiKey: randomString(32), createdAt: Date.now() };
+    const project = { id: randomString(16), userId: req.user.id, name, packageName, type: type || 'Web', allowedOrigin: "*", apiKey: randomString(32), apiCalls: 0, createdAt: Date.now() };
     db.projects.push(project);
     saveDB(db);
     res.json({ project });
+  } catch { res.status(500).json({ error: 'Hata' }); }
+});
+
+// PROJE SİLME
+app.delete('/api/projects/:id', authenticateToken, (req, res) => {
+  try {
+    const db = loadDB();
+    const pIndex = db.projects.findIndex(p => p.id === req.params.id && p.userId === req.user.id);
+    if (pIndex === -1) return res.status(403).json({ error: 'Yetkisiz veya bulunamadı' });
+    
+    // Projeyi ve projeye ait verileri sil
+    db.projects.splice(pIndex, 1);
+    db.appData = db.appData.filter(d => d.projectId !== req.params.id);
+    
+    saveDB(db);
+    res.json({ success: true });
   } catch { res.status(500).json({ error: 'Hata' }); }
 });
 
@@ -207,6 +234,14 @@ app.put('/api/projects/:id/settings', authenticateToken, (req, res) => {
   } catch { res.status(500).json({ error: 'Hata' }); }
 });
 
+// VERİLERİ LİSTELEME (Dashboard İçin)
+app.get('/api/projects/:id/data', authenticateToken, (req, res) => {
+  const db = loadDB();
+  const data = db.appData.filter(d => d.projectId === req.params.id);
+  res.json({ data });
+});
+
+// GELİŞTİRİCİ VERİ KAYDETME
 app.post('/api/app/data', authenticateApp, (req, res) => {
   try {
     const { key, value } = req.body;
@@ -218,6 +253,20 @@ app.post('/api/app/data', authenticateApp, (req, res) => {
     res.json({ success: true, message: 'Veri kaydedildi' });
   } catch { res.status(500).json({ error: 'Sunucu hatası' }); }
 });
+
+// GELİŞTİRİCİ VERİ OKUMA
+app.get('/api/app/data/:key', authenticateApp, (req, res) => {
+  const db = loadDB();
+  const data = db.appData.find(d => d.projectId === req.project.id && d.key === req.params.key);
+  if (!data) return res.status(404).json({ error: 'Veri bulunamadı' });
+  res.json({ key: data.key, value: data.value });
+});
+
+// Arka planda kendi kendine ping atarak uyanık kalma denemesi (Render için)
+setInterval(() => {
+  const http = require('http');
+  http.get(`http://localhost:${PORT}/ping`, () => {}).on('error', () => {});
+}, 10 * 60 * 1000); // Her 10 dakikada bir
 
 // ==========================================
 // VANTORIUM BASE FRONTEND
@@ -255,6 +304,8 @@ app.get('/', (req, res) => {
         .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 8px 20px rgba(79, 70, 229, 0.3); opacity: 0.95; }
         .btn-outline { background: #fff; border: 1px solid #e2e8f0; transition: all 0.2s; }
         .btn-outline:hover { background: #f8fafc; border-color: #cbd5e1; }
+        .btn-danger { background: #fef2f2; color: #ef4444; border: 1px solid #fee2e2; transition: all 0.2s; }
+        .btn-danger:hover { background: #ef4444; color: #fff; }
         
         .input-field { background: #fff; border: 1px solid #e2e8f0; transition: all 0.2s; }
         .input-field:focus { outline: none; border-color: #6366f1; box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.1); }
@@ -268,6 +319,9 @@ app.get('/', (req, res) => {
         @keyframes spin { to { transform: rotate(360deg); } }
         
         .glow { position: absolute; width: 400px; height: 400px; background: radial-gradient(circle, rgba(124,58,237,0.15) 0%, rgba(255,255,255,0) 70%); border-radius: 50%; z-index: -1; }
+        
+        /* Modal */
+        .modal-overlay { background: rgba(15, 23, 42, 0.5); backdrop-filter: blur(4px); }
     </style>
 </head>
 <body class="antialiased overflow-hidden text-[15px] relative">
@@ -286,7 +340,7 @@ app.get('/', (req, res) => {
             <p class="text-sm text-gray-500 mt-2">Güvenlik Duvarı</p>
         </div>
         
-        <div id="humanBox" class="bg-white p-6 rounded-2xl border border-gray-100 shadow-[0_8px_30px_rgb(0,0,0,0.04)] flex items-center justify-between cursor-pointer card-hover" onclick="startVerifyFlow(event)">
+        <div id="humanBox" class="bg-white p-6 rounded-2xl border border-gray-100 shadow-[0_8px_30px_rgb(0,0,0,0.04)] flex items-center justify-between cursor-pointer card-hover" onclick="startVerifyFlow()">
             <div class="flex items-center gap-4">
                 <div class="w-7 h-7 border-2 border-gray-300 rounded-lg flex items-center justify-center bg-white transition-colors" id="checkBox">
                     <div id="checkSpinner" class="hidden spinner"></div>
@@ -297,10 +351,15 @@ app.get('/', (req, res) => {
             <svg class="w-7 h-7 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>
         </div>
         
+        <!-- Yükleniyor Uyarısı (Sunucu Uyanırken Çıkar) -->
+        <div id="serverWakeup" class="hidden mt-4 p-3 bg-amber-50 border border-amber-100 rounded-xl text-center">
+            <p class="text-xs text-amber-700 font-medium animate-pulse">Sunucu uyanıyor, lütfen 10-50 saniye bekleyin...</p>
+        </div>
+
         <div id="captchaModal" class="hidden bg-white p-6 rounded-2xl border border-gray-100 shadow-lg mt-4 fade-in">
             <div class="flex justify-between items-center mb-4">
                 <p class="text-sm text-gray-600 font-medium">İşlemi tamamlayın:</p>
-                <span id="attemptsDisplay" class="text-xs font-bold px-2.5 py-1 bg-red-50 text-red-600 rounded-lg border border-red-100">Kalan Hak: 3</span>
+                <span id="attemptsDisplay" class="text-xs font-bold px-2.5 py-1 bg-red-50 text-red-600 rounded-lg border border-red-100">Kalan Hak: 2</span>
             </div>
             <div class="flex items-center gap-4 mb-5">
                 <div class="bg-indigo-50 border border-indigo-100 px-6 py-3 rounded-xl font-mono text-xl font-bold text-indigo-700" id="captchaQuestion">-</div>
@@ -394,9 +453,27 @@ app.get('/', (req, res) => {
     </main>
 </div>
 
+<!-- VERİ İZLEYİCİ MODAL -->
+<div id="dataModal" class="fixed inset-0 z-[90] hidden items-center justify-center modal-overlay p-4">
+    <div class="bg-white rounded-3xl shadow-2xl w-full max-w-2xl overflow-hidden fade-in flex flex-col max-h-[80vh]">
+        <div class="p-6 border-b border-gray-100 flex justify-between items-center bg-gray-50/50">
+            <div>
+                <h3 class="text-xl font-bold text-gray-900" id="dataModalTitle">Veri İzleyici</h3>
+                <p class="text-xs text-gray-500 mt-1">API üzerinden kaydedilen veriler</p>
+            </div>
+            <button onclick="closeDataModal()" class="p-2 bg-white rounded-lg border border-gray-200 hover:bg-gray-50 text-gray-500 transition">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+            </button>
+        </div>
+        <div class="p-6 overflow-y-auto bg-gray-50 flex-1">
+            <pre id="dataContent" class="text-sm font-mono text-indigo-700 bg-white p-4 rounded-xl border border-gray-200">Yükleniyor...</pre>
+        </div>
+    </div>
+</div>
+
 <script>
     document.addEventListener('contextmenu', e => {
-        if (e.target.closest('.select-text') || e.target.tagName === 'INPUT') return;
+        if (e.target.closest('.select-text') || e.target.tagName === 'INPUT' || e.target.tagName === 'PRE') return;
         e.preventDefault();
     });
     document.addEventListener('keydown', e => {
@@ -430,37 +507,42 @@ app.get('/', (req, res) => {
         if (token) { showDashboard(); } else { document.getElementById('authView').classList.remove('hidden'); }
     }
 
-    async function startVerifyFlow(e) {
+    async function startVerifyFlow() {
         if (isVerifying) return;
         isVerifying = true;
 
         document.getElementById('checkSpinner').classList.remove('hidden');
         document.getElementById('humanBox').classList.add('pointer-events-none');
         
-        setTimeout(async () => {
-            try {
-                // Yapay gecikme (Cloudflare taklidi)
-                const res = await fetch(API_URL + '/api/generate-captcha');
-                if (!res.ok) throw new Error("Sunucu yanıt vermedi");
-                const data = await res.json();
-                
-                verifyCaptchaId = data.captchaId;
-                document.getElementById('captchaQuestion').innerText = data.soru;
-                
-                // Başarılıysa spinner'ı gizle ve captcha'yı aç
-                document.getElementById('checkSpinner').classList.add('hidden');
-                document.getElementById('checkBox').classList.replace('border-gray-300', 'bg-indigo-600 border-indigo-600');
-                document.getElementById('checkIcon').classList.remove('hidden');
-                document.getElementById('captchaModal').classList.remove('hidden');
-                document.getElementById('captchaInput').focus();
-            } catch (error) {
-                // HATA OLURSA (İnternet yoksa veya sunucu uyanmıyorsa) KUTUYU TEKRAR AÇ
-                showToast("Sunucuya ulaşılamadı. Lütfen tekrar deneyin.", "error");
-                document.getElementById('checkSpinner').classList.add('hidden');
-                document.getElementById('humanBox').classList.remove('pointer-events-none');
-                isVerifying = false;
-            }
-        }, 1000);
+        // 3 saniye sonra uyarı göster (Sunucu uyanmıyorsa)
+        const wakeupTimer = setTimeout(() => {
+            document.getElementById('serverWakeup').classList.remove('hidden');
+        }, 3000);
+
+        try {
+            const res = await fetch(API_URL + '/api/generate-captcha');
+            clearTimeout(wakeupTimer);
+            document.getElementById('serverWakeup').classList.add('hidden');
+            
+            if (!res.ok) throw new Error("Sunucu yanıt vermedi");
+            const data = await res.json();
+            
+            verifyCaptchaId = data.captchaId;
+            document.getElementById('captchaQuestion').innerText = data.soru;
+            
+            document.getElementById('checkSpinner').classList.add('hidden');
+            document.getElementById('checkBox').classList.replace('border-gray-300', 'bg-indigo-600 border-indigo-600');
+            document.getElementById('checkIcon').classList.remove('hidden');
+            document.getElementById('captchaModal').classList.remove('hidden');
+            document.getElementById('captchaInput').focus();
+        } catch (error) {
+            clearTimeout(wakeupTimer);
+            document.getElementById('serverWakeup').classList.add('hidden');
+            showToast("Sunucuya ulaşılamadı. Lütfen tekrar deneyin.", "error");
+            document.getElementById('checkSpinner').classList.add('hidden');
+            document.getElementById('humanBox').classList.remove('pointer-events-none');
+            isVerifying = false;
+        }
     }
 
     async function submitCaptcha() {
@@ -605,6 +687,16 @@ app.get('/', (req, res) => {
         } else { showToast(data.error || "Hata!"); }
     }
 
+    async function deleteProject(id) {
+        if(!confirm("Bu projeyi ve içindeki tüm verileri silmek istediğinize emin misiniz?")) return;
+        const res = await fetch(API_URL + '/api/projects/' + id, {
+            method: 'DELETE', 
+            headers: { 'Authorization': 'Bearer ' + token }
+        });
+        if(res.ok) { showToast("Proje silindi!", "success"); loadProjects(); }
+        else { showToast("Silinemedi!"); }
+    }
+
     async function saveSettings(id) {
         const origin = document.getElementById('origin-' + id).value;
         const res = await fetch(API_URL + '/api/projects/' + id + '/settings', {
@@ -613,6 +705,29 @@ app.get('/', (req, res) => {
             body: JSON.stringify({ allowedOrigin: origin })
         });
         if(res.ok) showToast("Domain kilidi güncellendi!", "success");
+    }
+
+    async function openDataModal(projectId, projectName) {
+        document.getElementById('dataModal').classList.remove('hidden');
+        document.getElementById('dataModal').classList.add('flex');
+        document.getElementById('dataModalTitle').innerText = projectName + ' | Veri İzleyici';
+        document.getElementById('dataContent').innerText = 'Yükleniyor...';
+
+        const res = await fetch(API_URL + '/api/projects/' + projectId + '/data', {
+            headers: { 'Authorization': 'Bearer ' + token }
+        });
+        const data = await res.json();
+        
+        if(data.data.length === 0) {
+            document.getElementById('dataContent').innerText = '// Bu projeye henüz veri kaydedilmemiş.\\n// Uygulamanızdan API isteği attığınızda veriler burada görünecektir.';
+        } else {
+            document.getElementById('dataContent').innerText = JSON.stringify(data.data, null, 2);
+        }
+    }
+
+    function closeDataModal() {
+        document.getElementById('dataModal').classList.add('hidden');
+        document.getElementById('dataModal').classList.remove('flex');
     }
 
     async function loadProjects() {
@@ -633,35 +748,48 @@ app.get('/', (req, res) => {
         data.projects.forEach(function(p) {
             var htmlStr = '<div class="bg-white border border-gray-200/60 p-6 rounded-2xl card-hover relative overflow-hidden group">';
             htmlStr += '<div class="absolute top-0 right-0 w-32 h-32 bg-indigo-50 rounded-bl-full -z-10 opacity-50 group-hover:scale-110 transition-transform"></div>';
+            
+            // Başlık
             htmlStr += '<div class="flex items-center justify-between mb-5">';
             htmlStr += '<div class="flex items-center gap-4">';
             htmlStr += '<div class="w-14 h-14 bg-gradient-to-br from-indigo-50 to-purple-50 border border-indigo-100 rounded-2xl flex items-center justify-center text-2xl shadow-sm">' + (icons[p.type] || '📦') + '</div>';
             htmlStr += '<div><h4 class="text-xl font-bold text-gray-900 tracking-tight">' + p.name + '</h4>';
-            htmlStr += '<p class="text-sm text-gray-500 font-medium mt-0.5">' + p.packageName + ' <span class="mx-1">•</span> ' + p.type + '</p></div></div>';
-            htmlStr += '<span class="text-xs px-3 py-1.5 bg-green-50 text-green-700 border border-green-200 rounded-lg font-bold shadow-sm">Aktif</span></div>';
+            htmlStr += '<p class="text-sm text-gray-500 font-medium mt-0.5">' + p.packageName + ' <span class="mx-1">•</span> ' + p.type + ' <span class="mx-1">•</span> <span class="text-indigo-600 font-bold">' + (p.apiCalls || 0) + ' API Çağrısı</span></p></div></div>';
             
+            // Aksiyonlar
+            htmlStr += '<div class="flex items-center gap-2">';
+            htmlStr += '<button onclick="openDataModal(\\'' + p.id + '\\', \\'' + p.name + '\\')" class="px-3 py-1.5 bg-indigo-50 text-indigo-600 border border-indigo-100 hover:bg-indigo-100 rounded-lg text-xs font-bold transition flex items-center gap-1">';
+            htmlStr += '<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4"></path></svg>';
+            htmlStr += 'Verileri Gör</button>';
+            htmlStr += '<button onclick="deleteProject(\\'' + p.id + '\\')" class="px-3 py-1.5 btn-danger rounded-lg text-xs font-bold flex items-center gap-1">';
+            htmlStr += '<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>';
+            htmlStr += 'Sil</button>';
+            htmlStr += '</div></div>';
+            
+            // API Key
             htmlStr += '<div class="bg-gray-50 p-4 rounded-xl font-mono text-sm text-gray-700 break-all mb-5 border border-gray-200 flex justify-between items-center group-hover:bg-white transition-colors">';
             htmlStr += '<span class="select-text font-medium">' + p.apiKey + '</span>';
-            htmlStr += '<button onclick="copyToClipboard(\'' + p.apiKey + '\')" class="ml-3 p-2.5 bg-white border border-gray-200 rounded-lg text-gray-400 hover:text-indigo-600 hover:border-indigo-200 hover:bg-indigo-50 transition-all shadow-sm" title="API Key Kopyala">';
+            htmlStr += '<button onclick="copyToClipboard(\\'' + p.apiKey + '\\')" class="ml-3 p-2.5 bg-white border border-gray-200 rounded-lg text-gray-400 hover:text-indigo-600 hover:border-indigo-200 hover:bg-indigo-50 transition-all shadow-sm" title="API Key Kopyala">';
             htmlStr += '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg></button></div>';
 
+            // Domain ve Rehber
             htmlStr += '<div class="grid grid-cols-1 md:grid-cols-2 gap-4">';
             htmlStr += '<div class="border border-gray-200 p-4 rounded-xl bg-white">';
             htmlStr += '<label class="text-xs font-bold text-gray-800 mb-2 block flex items-center gap-1">';
             htmlStr += '<svg class="w-3.5 h-3.5 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>';
-            htmlStr += 'Klonlama Koruması (Domain Kilidi)</label>';
+            htmlStr += 'Domain Kilidi</label>';
             htmlStr += '<div class="flex gap-2">';
             htmlStr += '<input type="text" id="origin-' + p.id + '" value="' + p.allowedOrigin + '" placeholder="Örn: siteadresin.com" class="flex-1 input-field p-2.5 rounded-lg text-sm select-text font-medium">';
-            htmlStr += '<button onclick="saveSettings(\'' + p.id + '\')" class="btn-outline px-4 rounded-lg text-sm font-bold text-gray-700">Kaydet</button></div>';
-            htmlStr += '<p class="text-[11px] text-gray-400 mt-2 font-medium">* Boş bırakırsan herkes erişebilir. Doldurursan sadece o site çalışır.</p></div>';
+            htmlStr += '<button onclick="saveSettings(\\'' + p.id + '\\')" class="btn-outline px-4 rounded-lg text-sm font-bold text-gray-700">Kaydet</button></div></div>';
 
             htmlStr += '<div class="flex items-center">';
-            htmlStr += '<button onclick="toggleGuide(\'' + p.id + '\')" class="w-full btn-outline py-3.5 rounded-xl text-sm font-bold text-gray-700 flex items-center justify-center gap-2">';
-            htmlStr += '<svg class="w-4 h-4 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path></svg>Entegrasyon Kodlarını Gör</button></div></div>';
+            htmlStr += '<button onclick="toggleGuide(\\'' + p.id + '\\')" class="w-full btn-outline py-3.5 rounded-xl text-sm font-bold text-gray-700 flex items-center justify-center gap-2">';
+            htmlStr += '<svg class="w-4 h-4 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path></svg>Entegrasyon Kodları</button></div></div>';
 
+            // Rehber İçeriği
             htmlStr += '<div id="guide-' + p.id + '" class="hidden mt-5 pt-5 border-t border-gray-100 space-y-4 text-sm">';
             htmlStr += '<div><span class="text-gray-800 font-bold block mb-2 text-xs uppercase tracking-wider">1. Veri Kaydet</span>';
-            htmlStr += '<pre class="bg-[#0f172a] text-indigo-300 p-4 rounded-xl mt-1 overflow-x-auto text-xs select-text font-mono shadow-inner border border-gray-800">fetch("' + API_URL + '/api/app/data", {\n  method: "POST",\n  headers: { "Content-Type": "application/json", "x-api-key": "' + p.apiKey + '" },\n  body: JSON.stringify({ key: "skor", value: 1500 })\n});</pre></div></div></div>';
+            htmlStr += '<pre class="bg-[#0f172a] text-indigo-300 p-4 rounded-xl mt-1 overflow-x-auto text-xs select-text font-mono shadow-inner border border-gray-800">fetch("' + API_URL + '/api/app/data", {\\n  method: "POST",\\n  headers: { "Content-Type": "application/json", "x-api-key": "' + p.apiKey + '" },\\n  body: JSON.stringify({ key: "skor", value: 1500 })\\n});</pre></div></div></div>';
 
             list.innerHTML += htmlStr;
         });
