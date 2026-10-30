@@ -189,12 +189,24 @@ app.get('/api/projects', authenticateToken, (req, res) => {
   res.json({ projects: db.projects.filter(p => p.userId === req.user.id) });
 });
 
+// PROJE OLUŞTURMA: Artık identifier (türe göre değişen alan) alıyor
 app.post('/api/projects', authenticateToken, (req, res) => {
   try {
-    const { name, packageName, type } = req.body;
-    if (!name || !packageName) return res.status(400).json({ error: 'Boş alan bırakma' });
+    const { name, identifier, type } = req.body;
+    if (!name || !identifier) return res.status(400).json({ error: 'Lütfen proje adı ve tanımlayıcı alanı doldurun' });
     const db = loadDB();
-    const project = { id: randomString(16), userId: req.user.id, name, packageName, type: type || 'Web', allowedOrigin: "*", apiKey: randomString(32), apiCalls: 0, createdAt: Date.now() };
+    const project = { 
+      id: randomString(16), 
+      userId: req.user.id, 
+      name, 
+      identifier: identifier, 
+      packageName: identifier, // Eski kodlarla uyumluluk için aynı değer
+      type: type || 'Web', 
+      allowedOrigin: "*", 
+      apiKey: randomString(32), 
+      apiCalls: 0, 
+      createdAt: Date.now() 
+    };
     db.projects.push(project);
     saveDB(db);
     res.json({ project });
@@ -256,7 +268,7 @@ setInterval(() => {
 }, 10 * 60 * 1000);
 
 // ==========================================
-// VANTORIUM BASE FRONTEND (MOBİL UYUMLU)
+// VANTORIUM BASE FRONTEND (AKILLI FORM)
 // ==========================================
 app.get('/', (req, res) => {
   const html = `
@@ -308,6 +320,7 @@ app.get('/', (req, res) => {
         .glow { position: absolute; width: 300px; height: 300px; background: radial-gradient(circle, rgba(124,58,237,0.15) 0%, rgba(255,255,255,0) 70%); border-radius: 50%; z-index: -1; }
         
         .modal-overlay { background: rgba(15, 23, 42, 0.5); backdrop-filter: blur(4px); }
+        #identifierLabel { transition: all 0.2s ease; }
     </style>
 </head>
 <body class="antialiased overflow-hidden text-[15px] relative w-full h-full">
@@ -449,17 +462,34 @@ app.get('/', (req, res) => {
                 </div>
             </div>
 
-            <!-- Proje Oluşturma Formu -->
-            <div class="bg-white border border-gray-200/60 p-4 rounded-2xl shadow-sm mb-8 flex flex-col md:flex-row gap-3">
-                <input type="text" id="projName" placeholder="Uygulama Adı" class="w-full md:flex-1 input-field p-3.5 rounded-xl text-sm bg-gray-50 hover:bg-white focus:bg-white transition">
-                <input type="text" id="projPackage" placeholder="Paket Adı (com.ornek)" class="w-full md:flex-1 input-field p-3.5 rounded-xl text-sm bg-gray-50 hover:bg-white focus:bg-white transition">
-                <select id="projType" class="w-full md:w-44 input-field p-3.5 rounded-xl text-sm bg-gray-50 hover:bg-white font-medium">
-                    <option value="Web">Web Uygulaması</option>
-                    <option value="Mobil">Mobil Uygulama</option>
-                    <option value="Oyun">Oyun</option>
-                    <option value="API">Backend API</option>
-                </select>
-                <button onclick="createProject()" class="w-full md:w-auto btn-primary font-bold px-8 py-3.5 rounded-xl text-sm whitespace-nowrap">Proje Oluştur</button>
+            <!-- PROJE OLUŞTURMA FORMU (AKILLI) -->
+            <div class="bg-white border border-gray-200/60 p-4 rounded-2xl shadow-sm mb-8">
+                <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">Yeni Proje Ekle</h3>
+                <div class="flex flex-col md:flex-row gap-3">
+                    <div class="flex-1 flex flex-col">
+                        <label class="text-[10px] md:text-xs font-bold text-gray-600 mb-1 ml-1">PROJE ADI</label>
+                        <input type="text" id="projName" placeholder="Örn: Süper Oyun" class="w-full input-field p-3 rounded-xl text-sm bg-gray-50 hover:bg-white focus:bg-white transition">
+                    </div>
+                    
+                    <div class="flex-1 flex flex-col">
+                        <label id="identifierLabel" class="text-[10px] md:text-xs font-bold text-gray-600 mb-1 ml-1">DOMAIN / URL</label>
+                        <input type="text" id="projIdentifier" placeholder="https://siteadresin.com" class="w-full input-field p-3 rounded-xl text-sm bg-gray-50 hover:bg-white focus:bg-white transition">
+                    </div>
+
+                    <div class="md:w-44 flex flex-col">
+                        <label class="text-[10px] md:text-xs font-bold text-gray-600 mb-1 ml-1">TÜR</label>
+                        <select id="projType" onchange="updateFormFields()" class="w-full input-field p-3 rounded-xl text-sm bg-gray-50 hover:bg-white font-medium">
+                            <option value="Web">🌐 Web Uygulaması</option>
+                            <option value="Mobil">📱 Mobil Uygulama</option>
+                            <option value="Oyun">🎮 Oyun</option>
+                            <option value="API">⚙️ Backend API</option>
+                        </select>
+                    </div>
+
+                    <div class="flex flex-col justify-end">
+                        <button onclick="createProject()" class="btn-primary font-bold px-6 py-3 rounded-xl text-sm whitespace-nowrap">Oluştur</button>
+                    </div>
+                </div>
             </div>
 
             <!-- Proje Listesi -->
@@ -468,7 +498,7 @@ app.get('/', (req, res) => {
     </main>
 </div>
 
-<!-- VERİ İZLEYİCİ MODAL (Mobil Uyumlu) -->
+<!-- VERİ İZLEYİCİ MODAL -->
 <div id="dataModal" class="fixed inset-0 z-[90] hidden items-center justify-center modal-overlay p-4">
     <div class="bg-white rounded-3xl shadow-2xl w-full max-w-2xl overflow-hidden fade-in flex flex-col max-h-[85vh]">
         <div class="p-5 md:p-6 border-b border-gray-100 flex justify-between items-center bg-gray-50/50 shrink-0">
@@ -487,6 +517,7 @@ app.get('/', (req, res) => {
 </div>
 
 <script>
+    // Anti-Kopyalama
     document.addEventListener('contextmenu', e => {
         if (e.target.closest('.select-text') || e.target.tagName === 'INPUT' || e.target.tagName === 'PRE') return;
         e.preventDefault();
@@ -507,6 +538,48 @@ app.get('/', (req, res) => {
         });
     }
 
+    // ==========================================
+    // AKILLI FORM: Türe Göre Alan Değiştirme
+    // ==========================================
+    const typeConfigs = {
+        'Web': { 
+            label: 'DOMAIN / URL', 
+            placeholder: 'https://siteadresin.com',
+            example: 'Sitenizin tam adresi'
+        },
+        'Mobil': { 
+            label: 'PAKET ADI', 
+            placeholder: 'com.sirket.uygulama',
+            example: 'Uygulamanızın paket adı'
+        },
+        'Oyun': { 
+            label: 'PLATFORM', 
+            placeholder: 'Steam / Play Store / Web',
+            example: 'Oyununuzun çalıştığı platform'
+        },
+        'API': { 
+            label: 'AÇIKLAMA', 
+            placeholder: 'Örn: Skor API\'si',
+            example: 'API\'nizin kısa açıklaması'
+        }
+    };
+
+    function updateFormFields() {
+        const type = document.getElementById('projType').value;
+        const cfg = typeConfigs[type] || typeConfigs['Web'];
+        
+        const label = document.getElementById('identifierLabel');
+        const input = document.getElementById('projIdentifier');
+        
+        // Animasyonlu geçiş
+        label.style.opacity = '0';
+        setTimeout(() => {
+            label.innerText = cfg.label;
+            input.placeholder = cfg.placeholder;
+            label.style.opacity = '1';
+        }, 150);
+    }
+
     const API_URL = window.location.origin;
     let token = localStorage.getItem('token');
     let verifyCaptchaId = '';
@@ -516,7 +589,7 @@ app.get('/', (req, res) => {
     let isVerifying = false;
 
     document.addEventListener('mousemove', () => { mouseMoved = true; });
-    document.addEventListener('touchstart', () => { mouseMoved = true; }); // Mobil için dokunma algılama
+    document.addEventListener('touchstart', () => { mouseMoved = true; });
 
     if (localStorage.getItem('humanVerified') === 'true') {
         document.getElementById('verifyScreen').classList.add('hidden');
@@ -679,25 +752,28 @@ app.get('/', (req, res) => {
         document.getElementById('authView').classList.add('hidden');
         document.getElementById('dashboardView').classList.remove('hidden');
         document.getElementById('userNameDisplay').innerText = localStorage.getItem('username') || 'Kullanıcı';
+        updateFormFields();
         loadProjects();
     }
 
     async function createProject() {
         const name = document.getElementById('projName').value;
-        const packageName = document.getElementById('projPackage').value;
+        const identifier = document.getElementById('projIdentifier').value;
         const type = document.getElementById('projType').value;
-        if (!name || !packageName) return showToast("Proje adı ve paket adı zorunlu!");
+        
+        if (!name || !identifier) return showToast("Lütfen proje adı ve tanımlayıcı alanı doldurun!");
 
         const res = await fetch(API_URL + '/api/projects', {
             method: 'POST', 
             headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
-            body: JSON.stringify({ name, packageName, type })
+            body: JSON.stringify({ name, identifier, type })
         });
         
         const data = await res.json();
         if (res.ok) { 
             showToast("Proje oluşturuldu!", "success");
-            document.getElementById('projName').value = ''; document.getElementById('projPackage').value = '';
+            document.getElementById('projName').value = ''; 
+            document.getElementById('projIdentifier').value = '';
             loadProjects(); 
         } else { showToast(data.error || "Hata!"); }
     }
@@ -745,6 +821,17 @@ app.get('/', (req, res) => {
         document.getElementById('dataModal').classList.remove('flex');
     }
 
+    // Türe göre ikonlar
+    const icons = { 'Web': '🌐', 'Mobil': '📱', 'Oyun': '🎮', 'API': '⚙️' };
+    
+    // Türe göre etiket (proje kartında gösterilecek)
+    const identifierLabels = { 
+        'Web': 'Domain', 
+        'Mobil': 'Paket', 
+        'Oyun': 'Platform', 
+        'API': 'Açıklama' 
+    };
+
     async function loadProjects() {
         const res = await fetch(API_URL + '/api/projects', { headers: { 'Authorization': 'Bearer ' + token } });
         if (!res.ok) { logout(); return; }
@@ -753,31 +840,31 @@ app.get('/', (req, res) => {
         const list = document.getElementById('projectsList');
         list.innerHTML = '';
         
-        // İstatistikleri güncelle
         let totalCalls = 0;
         data.projects.forEach(p => totalCalls += (p.apiCalls || 0));
         document.getElementById('statProjects').innerText = data.projects.length;
         document.getElementById('statCalls').innerText = totalCalls;
 
         if(data.projects.length === 0) {
-            list.innerHTML = '<div class="col-span-1 text-center text-gray-400 py-12 font-medium bg-white border border-dashed border-gray-200 rounded-2xl">Henüz bir proje oluşturmadın kral.</div>';
+            list.innerHTML = '<div class="col-span-1 text-center text-gray-400 py-12 font-medium bg-white border border-dashed border-gray-200 rounded-2xl">Henüz bir proje oluşturmadın. Yukarıdan ilk projeni oluştur!</div>';
             return;
         }
 
-        const icons = { 'Web': '🌐', 'Mobil': '📱', 'Oyun': '🎮', 'API': '⚙️' };
-
         data.projects.forEach(function(p) {
             var date = new Date(p.createdAt).toLocaleDateString('tr-TR');
+            var identifier = p.identifier || p.packageName || '';
+            var identifierLabel = identifierLabels[p.type] || 'Tanımlayıcı';
             
             var htmlStr = '<div class="bg-white border border-gray-200/60 p-4 md:p-6 rounded-2xl card-hover relative overflow-hidden group">';
             htmlStr += '<div class="absolute top-0 right-0 w-24 h-24 md:w-32 md:h-32 bg-indigo-50 rounded-bl-full -z-10 opacity-50 group-hover:scale-110 transition-transform"></div>';
             
-            // Başlık & Detaylar
+            // Başlık
             htmlStr += '<div class="flex flex-col md:flex-row md:items-center justify-between mb-4 gap-3">';
             htmlStr += '<div class="flex items-center gap-3">';
             htmlStr += '<div class="w-12 h-12 md:w-14 md:h-14 bg-gradient-to-br from-indigo-50 to-purple-50 border border-indigo-100 rounded-2xl flex items-center justify-center text-2xl shadow-sm shrink-0">' + (icons[p.type] || '📦') + '</div>';
             htmlStr += '<div><h4 class="text-lg md:text-xl font-bold text-gray-900 tracking-tight">' + p.name + '</h4>';
-            htmlStr += '<p class="text-xs md:text-sm text-gray-500 font-medium mt-0.5">' + p.packageName + ' <span class="mx-1">•</span> ' + p.type + ' <span class="mx-1">•</span> ' + date + '</p></div></div>';
+            htmlStr += '<p class="text-xs md:text-sm text-gray-500 font-medium mt-0.5"><span class="font-bold text-indigo-600">' + identifierLabel + ':</span> ' + identifier + '</p>';
+            htmlStr += '<p class="text-[10px] md:text-xs text-gray-400 font-medium mt-0.5">' + p.type + ' <span class="mx-1">•</span> ' + date + '</p></div></div>';
             
             // Aksiyon Butonları
             htmlStr += '<div class="flex items-center gap-2">';
@@ -786,13 +873,13 @@ app.get('/', (req, res) => {
             htmlStr += '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>';
             htmlStr += '</button></div></div>';
             
-            // API Key Alanı
+            // API Key
             htmlStr += '<div class="bg-gray-50 p-3 md:p-4 rounded-xl font-mono text-xs md:text-sm text-gray-700 break-all mb-4 border border-gray-200 flex justify-between items-center group-hover:bg-white transition-colors">';
             htmlStr += '<span class="select-text font-medium truncate mr-2">' + p.apiKey + '</span>';
             htmlStr += '<button onclick="copyToClipboard(\\'' + p.apiKey + '\\')" class="p-2 bg-white border border-gray-200 rounded-lg text-gray-400 hover:text-indigo-600 hover:border-indigo-200 hover:bg-indigo-50 transition-all shadow-sm shrink-0" title="Kopyala">';
             htmlStr += '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg></button></div>';
 
-            // Alt Butonlar (Mobilde Alt Alta)
+            // Alt Butonlar
             htmlStr += '<div class="flex flex-col md:flex-row gap-3">';
             htmlStr += '<button onclick="openDataModal(\\'' + p.id + '\\', \\'' + p.name + '\\')" class="w-full btn-outline py-2.5 rounded-xl text-xs font-bold text-gray-700 flex items-center justify-center gap-2">';
             htmlStr += '<svg class="w-4 h-4 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4"></path></svg>';
@@ -801,17 +888,15 @@ app.get('/', (req, res) => {
             htmlStr += '<button onclick="toggleGuide(\\'' + p.id + '\\')" class="w-full btn-outline py-2.5 rounded-xl text-xs font-bold text-gray-700 flex items-center justify-center gap-2">';
             htmlStr += '<svg class="w-4 h-4 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path></svg>Entegrasyon Kodu</button></div>';
 
-            // Entegrasyon Detayları (Gizli)
+            // Entegrasyon Detayları
             htmlStr += '<div id="guide-' + p.id + '" class="hidden mt-4 pt-4 border-t border-gray-100 space-y-4">';
             
-            // Domain Kilidi
             htmlStr += '<div class="border border-gray-200 p-3 rounded-xl bg-gray-50">';
             htmlStr += '<label class="text-xs font-bold text-gray-800 mb-2 block">Domain Kilidi (Klonlama Koruması)</label>';
             htmlStr += '<div class="flex gap-2">';
             htmlStr += '<input type="text" id="origin-' + p.id + '" value="' + p.allowedOrigin + '" placeholder="Örn: siteadresin.com" class="flex-1 input-field p-2 rounded-lg text-xs select-text">';
             htmlStr += '<button onclick="saveSettings(\\'' + p.id + '\\')" class="btn-outline px-3 rounded-lg text-xs font-bold text-gray-700">Kaydet</button></div></div>';
 
-            // Fetch Kodu
             htmlStr += '<div><span class="text-gray-800 font-bold block mb-1 text-[10px] uppercase tracking-wider">Veri Kaydet (Fetch)</span>';
             htmlStr += '<pre class="bg-[#0f172a] text-indigo-300 p-3 rounded-xl mt-1 overflow-x-auto text-[11px] select-text font-mono shadow-inner border border-gray-800">fetch("' + API_URL + '/api/app/data", {\\n  method: "POST",\\n  headers: { "Content-Type": "application/json", "x-api-key": "' + p.apiKey + '" },\\n  body: JSON.stringify({ key: "skor", value: 1500 })\\n});</pre></div>';
 
